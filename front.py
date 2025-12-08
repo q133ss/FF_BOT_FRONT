@@ -3156,7 +3156,23 @@ async def on_slot_confirm(callback: CallbackQuery, state: FSMContext) -> None:
         return
 
     data = await state.get_data()
+    telegram_id = callback.from_user.id
 
+    # 1) Получаем user_id через backend
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"{BACKEND_URL}/users/get-id",
+                params={"telegram_id": telegram_id}
+            )
+            resp.raise_for_status()
+            user_id = resp.json().get("user_id")
+    except Exception as e:
+        print("Error calling /users/get-id:", e)
+        await callback.message.answer("Ошибка получения user_id. Попробуй позже.")
+        return
+
+    # 2) Подготовка данных задачи
     warehouse = data.get("warehouse")
     supply_type = data.get("supply_type")
     max_coef = data.get("max_coef")
@@ -3165,68 +3181,45 @@ async def on_slot_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     weekdays_code = data.get("weekdays")
     max_logistics_coef_percent = data.get("max_logistics_coef_percent")
 
-    # --- ДОБАВЛЯЕМ ЗАПУСК МОНИТОРИНГА ---
+    # → supply_type преобразуем в формат backend (русские названия)
+    supply_type_backend = {
+        "box": "Короба",
+        "mono": "Монопаллеты",
+        "postal": "Поштучная паллета",
+        "safe": "Суперсейф",
+    }.get(supply_type)
 
-    telegram_id = callback.from_user.id
-    session_id = telegram_id
-
-    if not session_id:
-        await callback.message.answer("Нет session_id. Авторизуйся заново.")
-        await callback.answer()
+    if warehouse is None:
+        await callback.message.answer("Ошибка: склад не выбран.")
         return
 
-    monitor_payload = {
-        "session_id": session_id,
-        "warehouse": data.get("warehouse"),
-        "delivery_type": {
-            "box": "Короба",
-            "mono": "Монопалеты",
-            "postal": "Поштучная паллета",
-            "safe": "Суперсейф"
-        }.get(data.get("supply_type")),
-        "max_coef": data.get("max_coef"),
-        "logistic_limit": data.get("max_logistics_coef_percent", 9999),
-        "days_ahead": data.get("lead_time_days", 3)
+    # 3) Формируем запрос /slots/search
+    payload = {
+        "warehouse": warehouse,
+        "supply_type": supply_type_backend,
+        "max_booking_coefficient": str(max_coef),
+        "max_logistics_percent": max_logistics_coef_percent or 9999,
+        "search_period_days": period_days if period_days is not None else 30,
+        "lead_time_days": lead_time_days,
+        "weekdays_only": (weekdays_code == "weekdays"),
+        "telegram_chat_id": telegram_id,
+        "user_id": user_id,
     }
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(f"{BACKEND_URL}/slots/start-monitoring", json=monitor_payload)
-        resp.raise_for_status()
-        monitor_result = resp.json()
-
-    await callback.message.answer(
-        f"Мониторинг запущен:\n"
-        f"Склад: {monitor_payload['warehouse']}\n"
-        f"Тип: {monitor_payload['delivery_type']}\n"
-        f"Дней вперёд: {monitor_payload['days_ahead']}"
-    )
-
+    # 4) Отправка запроса
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
-                f"{BACKEND_URL}/slot-search/create",
-                json={
-                    "telegram_id": telegram_id,
-                    "warehouse": warehouse,
-                    "supply_type": supply_type,
-                    "max_coef": max_coef,
-                    "period_days": period_days if period_days is not None else 30,
-                    "lead_time_days": lead_time_days,
-                    "weekdays": weekdays_code,
-                    "max_logistics_coef_percent": max_logistics_coef_percent,
-                },
-            )
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.post(f"{BACKEND_URL}/slots/search", json=payload)
             resp.raise_for_status()
+            result = resp.json()
     except Exception as e:
-        print("Error calling /slot-search/create:", e)
-        msg_err = await callback.message.answer("Не удалось создать задачу на поиск слота. Попробуй позже.")
-        await add_ui_message(state, msg_err.message_id)
-        await state.clear()
+        print("Error calling /slots/search:", e)
+        await callback.message.answer("Ошибка создания задачи на поиск слота.")
         return
 
-    await clear_all_ui(callback.message, state)
+    # 5) Переход в список задач
     await state.clear()
-    await _do_main_menu_my_searches(callback.message, state, callback.from_user.id)
+    await _do_main_menu_my_searches(callback.message, state, telegram_id)
 
 
 async def main() -> None:
