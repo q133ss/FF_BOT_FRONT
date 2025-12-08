@@ -2837,7 +2837,7 @@ async def on_autobook_choose_account(callback: CallbackQuery, state: FSMContext)
 async def on_slot_warehouse(callback: CallbackQuery, state: FSMContext) -> None:
     telegram_id = callback.from_user.id
 
-    # --- правильная проверка ---
+    # --- Проверяем авторизацию WB ---
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(
@@ -2860,11 +2860,38 @@ async def on_slot_warehouse(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer()
         return
 
-    # --- если авторизован — продолжаем как раньше ---
     await callback.answer()
     await clear_all_ui(callback.message, state)
+
+    # ================================================================
+    # 1) ИЗВЛЕКАЕМ WAREHOUSE ИЗ CALLBACK — С ЗАЩИТОЙ ОТ ДВОЙНЫХ ВЫЗОВОВ
+    # ================================================================
+    data_cb = callback.data or ""
+    parts = data_cb.split(":", 1)
+    warehouse = parts[1] if len(parts) == 2 and parts[1].strip() else None
+
+    # Получаем старый state
+    data = await state.get_data()
+
+    # Если callback содержит склад → обновляем
+    if warehouse:
+        await state.update_data(warehouse=warehouse)
+    else:
+        # Если callback пришёл пустой (второй вызов) → восстанавливаем из state
+        warehouse = data.get("warehouse")
+
+    # Если даже state не помог — ошибка
+    if not warehouse:
+        await callback.message.answer("Ошибка: склад не выбран. Попробуй снова.")
+        return
+
+    print("WAREHOUSE SAVED:", warehouse)
+
+    # ================================================================
+    # 2) ПОКАЗЫВАЕМ ШАГ «ВЫБОР ТИПА ПОСТАВКИ»
+    # ================================================================
     kb = InlineKeyboardMarkup(
-    inline_keyboard=[
+        inline_keyboard=[
             [
                 InlineKeyboardButton(text="📦 Короба", callback_data="slot_supply:box"),
                 InlineKeyboardButton(text="🟫 Монопаллеты", callback_data="slot_supply:mono"),
@@ -2876,10 +2903,12 @@ async def on_slot_warehouse(callback: CallbackQuery, state: FSMContext) -> None:
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_main")],
         ]
     )
+
     msg = await callback.message.answer(
         "Шаг 2 из 7 — тип поставки.\n\nВыбери один из вариантов:",
         reply_markup=kb,
     )
+
     await add_ui_message(state, msg.message_id)
     await state.set_state(SlotSearchState.supply_type)
 
