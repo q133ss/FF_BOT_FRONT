@@ -2836,25 +2836,35 @@ async def on_autobook_choose_account(callback: CallbackQuery, state: FSMContext)
 
 async def on_slot_warehouse(callback: CallbackQuery, state: FSMContext) -> None:
     telegram_id = callback.from_user.id
-    if telegram_id not in user_sessions:
-        await callback.message.answer("Ты не авторизован в WB ❌\nПерейди в меню → Авторизация WB")
+
+    # --- правильная проверка ---
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"{BACKEND_URL}/wb/auth/status",
+                params={"telegram_id": telegram_id},
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            authorized = bool(payload.get("authorized"))
+    except Exception as e:
+        print("Error checking WB auth:", e)
+        await callback.message.answer("Не удалось проверить авторизацию WB. Попробуй позже.")
         await callback.answer()
         return
 
+    if not authorized:
+        await callback.message.answer(
+            "Ты не авторизован в WB ❌\nПерейди в меню → Авторизация WB"
+        )
+        await callback.answer()
+        return
+
+    # --- если авторизован — продолжаем как раньше ---
     await callback.answer()
     await clear_all_ui(callback.message, state)
-
-    data_cb = callback.data or ""
-    try:
-        _, warehouse = data_cb.split(":", 1)
-    except Exception:
-        warehouse = None
-
-    if warehouse:
-        await state.update_data(warehouse=warehouse)
-
     kb = InlineKeyboardMarkup(
-        inline_keyboard=[
+    inline_keyboard=[
             [
                 InlineKeyboardButton(text="📦 Короба", callback_data="slot_supply:box"),
                 InlineKeyboardButton(text="🟫 Монопаллеты", callback_data="slot_supply:mono"),
@@ -2872,6 +2882,7 @@ async def on_slot_warehouse(callback: CallbackQuery, state: FSMContext) -> None:
     )
     await add_ui_message(state, msg.message_id)
     await state.set_state(SlotSearchState.supply_type)
+
 
 
 async def on_slot_supply(callback: CallbackQuery, state: FSMContext) -> None:
@@ -3157,7 +3168,7 @@ async def on_slot_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     # --- ДОБАВЛЯЕМ ЗАПУСК МОНИТОРИНГА ---
 
     telegram_id = callback.from_user.id
-    session_id = user_sessions.get(telegram_id)
+    session_id = telegram_id
 
     if not session_id:
         await callback.message.answer("Нет session_id. Авторизуйся заново.")
