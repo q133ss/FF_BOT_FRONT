@@ -20,17 +20,15 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 
-
 PAGE_SIZE = 5
 AUTBOOK_PAGE_SIZE = 5
 MOVES_PAGE_SIZE = 5
-user_sessions = {} # ЗАМЕНИТЬ НА РЕАЛЬНУЮ БД
 
 # Загружаем переменные окружения
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-BACKEND_URL = "http://127.0.0.1:8001"
+BACKEND_URL = "http://127.0.0.1:8000"
 
 
 class WbAuthState(StatesGroup):
@@ -99,21 +97,6 @@ def get_lead_time_keyboard() -> ReplyKeyboardMarkup:
 
 def get_weekdays_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardRemove()
-
-def normalize_phone(raw: str) -> str:
-    digits = "".join(ch for ch in raw if ch.isdigit())
-
-    # Убираем +7, 7, 8
-    if digits.startswith("8"):
-        digits = digits[1:]
-    elif digits.startswith("7"):
-        digits = digits[1:]
-
-    # WB принимает только 10 цифр
-    if len(digits) != 10:
-        return None
-
-    return digits
 
 
 def get_logistics_coef_keyboard() -> ReplyKeyboardMarkup:
@@ -345,26 +328,12 @@ async def show_moves_list(message: Message, state: FSMContext, telegram_id: int,
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
-                f"{BACKEND_URL}/slots/search",
-                json={
-                    "warehouse": warehouse,
-                    "supply_type": {
-                        "box": "Короба",
-                        "mono": "Монопаллеты",
-                        "postal": "Поштучная паллета",
-                        "safe": "Суперсейф"
-                    }[supply_type],
-                    "max_booking_coefficient": str(max_coef),
-                    "max_logistics_percent": max_logistics_coef_percent or 9999,
-                    "search_period_days": period_days if period_days is not None else 30,
-                    "lead_time_days": lead_time_days,
-                    "weekdays_only": (weekdays_code == "weekdays"),
-                    "telegram_chat_id": telegram_id,
-                    "user_id": payload.get("user_id", telegram_id)
-                },
+            resp = await client.get(
+                f"{BACKEND_URL}/stock-move/list",
+                params={"telegram_id": telegram_id},
             )
             resp.raise_for_status()
+            tasks = resp.json()
     except Exception as e:
         print("Error calling /stock-move/list:", e)
         kb_err = InlineKeyboardMarkup(
@@ -1169,75 +1138,51 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
 
 
 async def wb_auth_phone_step(message: Message, state: FSMContext) -> None:
-    phone_raw = message.text.strip()
+    phone = message.text.strip()
     telegram_id = message.from_user.id
-
-    await clear_all_ui(message, state)
 
     kb_main = InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")]]
     )
 
-    normalized = normalize_phone(phone_raw)
-    if not normalized:
+    if not (phone.isdigit() and phone.startswith("7") and len(phone) == 11):
         msg_err = await message.answer(
-            "Номер должен быть российским формата:\n"
-            "8951…, +7951…, 7951…, или просто 951…\n\n"
-            "Итог: должен получиться номер из 10 цифр.",
+            "Похоже, номер в неправильном формате. Нужен формат 7XXXXXXXXXX.\nПопробуй ещё раз.",
             reply_markup=kb_main,
         )
         await add_ui_message(state, msg_err.message_id)
         return
 
-    # --- отправляем запрос ---
+    await clear_all_ui(message, state)
+
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(
-                f"{BACKEND_URL}/auth/start",
-                json={
-                    "telegram_id": telegram_id,
-                    "username": message.from_user.username,
-                    "phone": normalized
-                },
+                f"{BACKEND_URL}/wb/auth/start",
+                json={"telegram_id": telegram_id, "phone": phone},
             )
             resp.raise_for_status()
-            payload = resp.json()
     except Exception as e:
-        print("Error calling /auth/start:", e)
-        msg = await message.answer("Сервер не отвечает. Попробуй позже.", reply_markup=kb_main)
-        await add_ui_message(state, msg.message_id)
-        return
-
-    # --- пользователь уже авторизован ---
-    if payload.get("status") == "already_authorized":
+        print("Error calling /wb/auth/start:", e)
         msg = await message.answer(
-            "Ты уже авторизован в кабинете WB ✅",
-            reply_markup=kb_main,
+            "Не удалось запустить авторизацию WB. Попробуй позже.", reply_markup=kb_main
         )
         await add_ui_message(state, msg.message_id)
         await state.clear()
         return
 
-    # --- не получили session_id ---
-    session_id = payload.get("session_id")
-    if not session_id:
-        msg = await message.answer(
-            "WB не принял номер или вернул неверный ответ. Попробуй снова.",
-            reply_markup=kb_main,
-        )
-        await add_ui_message(state, msg.message_id)
-        return
-
-    # сохраняем
-    await state.update_data(phone=normalized, session_id=session_id)
+    await state.update_data(phone=phone)
     await state.set_state(WbAuthState.wait_code)
 
-    msg = await message.answer("Отлично! Введи код из СМС.", reply_markup=kb_main)
+    msg = await message.answer("Отлично! Теперь введи код из СМС от WB.", reply_markup=kb_main)
     await add_ui_message(state, msg.message_id)
 
 
 async def wb_auth_code_step(message: Message, state: FSMContext) -> None:
     code = message.text.strip()
+    telegram_id = message.from_user.id
+    data = await state.get_data()
+    phone = data.get("phone")
 
     await clear_all_ui(message, state)
 
@@ -1246,72 +1191,73 @@ async def wb_auth_code_step(message: Message, state: FSMContext) -> None:
     )
 
     if not code.isdigit():
-        msg_err = await message.answer("Код должен содержать только цифры.", reply_markup=kb_main)
+        msg_err = await message.answer("Код должен быть числом. Попробуй ещё раз.", reply_markup=kb_main)
         await add_ui_message(state, msg_err.message_id)
         return
 
-    data = await state.get_data()
-    session_id = data.get("session_id")
-    telegram_id = message.from_user.id
-
-    if not session_id:
-        msg_err = await message.answer("Не найдена сессия авторизации. Начни заново.", reply_markup=kb_main)
+    if not phone:
+        msg_err = await message.answer(
+            "Что-то пошло не так с сохранением номера. Попробуй ещё раз через меню «Авторизация WB».",
+            reply_markup=kb_main,
+        )
         await add_ui_message(state, msg_err.message_id)
         await state.clear()
         return
 
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(
-                f"{BACKEND_URL}/auth/code",
-                json={"session_id": session_id, "code": code},
+                f"{BACKEND_URL}/wb/auth/confirm",
+                json={
+                    "telegram_id": telegram_id,
+                    "phone": phone,
+                    "code": code,
+                },
             )
             resp.raise_for_status()
             payload = resp.json()
-            user_sessions[telegram_id] = session_id
     except Exception as e:
-        print("Error calling /auth/code:", e)
-        msg_err = await message.answer("Ошибка подтверждения кода. Попробуй снова.", reply_markup=kb_main)
+        print("Error calling /wb/auth/confirm:", e)
+        msg_err = await message.answer("Не удалось подтвердить код. Попробуй позже.", reply_markup=kb_main)
         await add_ui_message(state, msg_err.message_id)
+        await state.clear()
         return
 
-    if payload.get("status") != "authorized":
-        msg_err = await message.answer("Код неверный. Попробуй снова.", reply_markup=kb_main)
-        await add_ui_message(state, msg_err.message_id)
+    authorized = payload.get("authorized") or payload.get("status") == "ok"
+    if not authorized:
+        msg_resp = await message.answer("Не удалось подтвердить код. Попробуй ещё раз.", reply_markup=kb_main)
+        await add_ui_message(state, msg_resp.message_id)
         return
 
     await state.clear()
-
-    # msg = await message.answer(
-    #     "Готово! Ты успешно авторизован в WB ✅",
-    #     reply_markup=kb_main,
-    # )
-    # await add_ui_message(state, msg.message_id)
-    if payload.get("status") in ("authorized", "ok"):
-        # сохраняем session id навсегда
-        user_sessions[telegram_id] = session_id
-
-        await state.clear()
-        msg = await message.answer("Готово! Ты успешно авторизован в WB ✅", reply_markup=kb_main)
-        await add_ui_message(state, msg.message_id)
-        return
-
+    text = "Готово! Ты успешно авторизован в кабинете WB ✅\n\nЧто дальше?"
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📋 Мои задачи", callback_data="menu_tasks")],
+            [InlineKeyboardButton(text="🤖 Автобронь", callback_data="menu_autobook")],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")],
+        ]
+    )
+    msg = await message.answer(text, reply_markup=kb)
+    await add_ui_message(state, msg.message_id)
 
 
 async def _do_wb_status(message: Message, state: FSMContext, telegram_id: int) -> None:
     authorized = False
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(f"{BACKEND_URL}/auth/status")
+    async with httpx.AsyncClient() as client:
+        try:
+            resp = await client.get(
+                f"{BACKEND_URL}/wb/auth/status",
+                params={"telegram_id": telegram_id},
+                timeout=5.0,
+            )
             resp.raise_for_status()
             payload = resp.json()
-            authorized = payload.get("authorized")
-    except Exception as e:
-        print("Error calling /auth/status:", e)
-        msg = await message.answer("Не удалось получить статус WB. Попробуй позже.")
-        await add_ui_message(state, msg.message_id)
-        return
-
+            authorized = bool(payload.get("authorized"))
+        except Exception:
+            msg = await message.answer("Не удалось проверить статус WB. Попробуй позже.")
+            await add_ui_message(state, msg.message_id)
+            return
 
     text = "Статус WB: авторизован ✅" if authorized else "Статус WB: не авторизован ❌"
     kb = InlineKeyboardMarkup(
@@ -2835,12 +2781,6 @@ async def on_autobook_choose_account(callback: CallbackQuery, state: FSMContext)
 
 
 async def on_slot_warehouse(callback: CallbackQuery, state: FSMContext) -> None:
-    telegram_id = callback.from_user.id
-    if telegram_id not in user_sessions:
-        await callback.message.answer("Ты не авторизован в WB ❌\nПерейди в меню → Авторизация WB")
-        await callback.answer()
-        return
-
     await callback.answer()
     await clear_all_ui(callback.message, state)
 
@@ -3154,41 +3094,7 @@ async def on_slot_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     weekdays_code = data.get("weekdays")
     max_logistics_coef_percent = data.get("max_logistics_coef_percent")
 
-    # --- ДОБАВЛЯЕМ ЗАПУСК МОНИТОРИНГА ---
-
     telegram_id = callback.from_user.id
-    session_id = user_sessions.get(telegram_id)
-
-    if not session_id:
-        await callback.message.answer("Нет session_id. Авторизуйся заново.")
-        await callback.answer()
-        return
-
-    monitor_payload = {
-        "session_id": session_id,
-        "warehouse": data.get("warehouse"),
-        "delivery_type": {
-            "box": "Короба",
-            "mono": "Монопалеты",
-            "postal": "Поштучная паллета",
-            "safe": "Суперсейф"
-        }.get(data.get("supply_type")),
-        "max_coef": data.get("max_coef"),
-        "logistic_limit": data.get("max_logistics_coef_percent", 9999),
-        "days_ahead": data.get("lead_time_days", 3)
-    }
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(f"{BACKEND_URL}/slots/start-monitoring", json=monitor_payload)
-        resp.raise_for_status()
-        monitor_result = resp.json()
-
-    await callback.message.answer(
-        f"Мониторинг запущен:\n"
-        f"Склад: {monitor_payload['warehouse']}\n"
-        f"Тип: {monitor_payload['delivery_type']}\n"
-        f"Дней вперёд: {monitor_payload['days_ahead']}"
-    )
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
