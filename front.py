@@ -1398,7 +1398,8 @@ async def _do_main_menu_my_searches(message: Message, state: FSMContext, telegra
                 params={"telegram_id": telegram_id},
             )
             resp.raise_for_status()
-            tasks = resp.json()
+            resp_data = resp.json()
+            tasks = resp_data.get("requests", [])
     except Exception as e:
         print("Error calling /slot-search/list:", e)
         msg_err = await message.answer("Не удалось получить список задач. Попробуй позже.")
