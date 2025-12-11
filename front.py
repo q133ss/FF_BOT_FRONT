@@ -3017,14 +3017,14 @@ async def on_slot_supply(callback: CallbackQuery, state: FSMContext) -> None:
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="x1", callback_data="slot_coef:1"),
+                InlineKeyboardButton(text="x0", callback_data="slot_coef:0"),
                 InlineKeyboardButton(text="x2", callback_data="slot_coef:2"),
                 InlineKeyboardButton(text="x3", callback_data="slot_coef:3"),
             ],
             [
-                InlineKeyboardButton(text="x4", callback_data="slot_coef:4"),
                 InlineKeyboardButton(text="x5", callback_data="slot_coef:5"),
                 InlineKeyboardButton(text="x10", callback_data="slot_coef:10"),
+                InlineKeyboardButton(text="x20", callback_data="slot_coef:20"),
             ],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="slot_back:warehouse")],
         ]
@@ -3055,15 +3055,15 @@ async def on_slot_coef(callback: CallbackQuery, state: FSMContext) -> None:
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [
+                InlineKeyboardButton(text="> 100%", callback_data="slot_log:100"),
                 InlineKeyboardButton(text="≤ 120%", callback_data="slot_log:120"),
+            ],
+            [
                 InlineKeyboardButton(text="≤ 140%", callback_data="slot_log:140"),
-            ],
-            [
                 InlineKeyboardButton(text="≤ 160%", callback_data="slot_log:160"),
-                InlineKeyboardButton(text="≤ 180%", callback_data="slot_log:180"),
             ],
             [
-                InlineKeyboardButton(text="≤ 200%", callback_data="slot_log:200"),
+                InlineKeyboardButton(text="≤ 180%", callback_data="slot_log:180"),
                 InlineKeyboardButton(text="Не ограничивать", callback_data="slot_log:none"),
             ],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="slot_back:supply")],
