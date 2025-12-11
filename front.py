@@ -1,6 +1,6 @@
 import os
 import asyncio
-from datetime import datetime
+from datetime import datetime, date, timedelta
 
 from dotenv import load_dotenv
 import httpx
@@ -3100,17 +3100,19 @@ async def on_slot_logistics(callback: CallbackQuery, state: FSMContext) -> None:
             await send_main_menu(callback.message, state)
             return
 
+    # сохраняем лимит логистики
     await state.update_data(max_logistics_coef_percent=max_logistics_coef_percent)
 
+    # кнопки периодов поиска
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="3 дня", callback_data="slot_period:3"),
-                InlineKeyboardButton(text="7 дней", callback_data="slot_period:7"),
+                InlineKeyboardButton(text="3 дня вперёд", callback_data="slot_period:3"),
+                InlineKeyboardButton(text="7 дней вперёд", callback_data="slot_period:7"),
             ],
             [
-                InlineKeyboardButton(text="10 дней", callback_data="slot_period:10"),
-                InlineKeyboardButton(text="30 дней", callback_data="slot_period:30"),
+                InlineKeyboardButton(text="10 дней вперёд", callback_data="slot_period:10"),
+                InlineKeyboardButton(text="30 дней вперёд", callback_data="slot_period:30"),
             ],
             [
                 InlineKeyboardButton(text="Не ограничивать", callback_data="slot_period:none"),
@@ -3124,8 +3126,11 @@ async def on_slot_logistics(callback: CallbackQuery, state: FSMContext) -> None:
         reply_markup=kb,
     )
     await add_ui_message(state, msg.message_id)
+
     await state.set_state(SlotSearchState.period_days)
 
+
+from datetime import date, timedelta
 
 async def on_slot_period(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
@@ -3151,24 +3156,51 @@ async def on_slot_period(callback: CallbackQuery, state: FSMContext) -> None:
         await send_main_menu(callback.message, state)
         return
 
+    # сохраняем период
     await state.update_data(period_days=period_days)
+
+    today = date.today()
+
+    # если None — считаем как 0
+    base_offset = period_days if period_days is not None else 0
+
+    # это дата, от которой начинаем отсчёт lead_time
+    base_date = today + timedelta(days=base_offset)
+
+    def fmt(offset: int) -> str:
+        """base_date + offset"""
+        return (base_date + timedelta(days=offset)).strftime("%d.%m")
 
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="1 день", callback_data="slot_lead:1"),
-                InlineKeyboardButton(text="2 дня", callback_data="slot_lead:2"),
+                InlineKeyboardButton(
+                    text=f"1 день ({fmt(1)})",
+                    callback_data="slot_lead:1"
+                ),
+                InlineKeyboardButton(
+                    text=f"2 дня ({fmt(2)})",
+                    callback_data="slot_lead:2"
+                ),
             ],
             [
-                InlineKeyboardButton(text="3 дня", callback_data="slot_lead:3"),
-                InlineKeyboardButton(text="5 дней", callback_data="slot_lead:5"),
+                InlineKeyboardButton(
+                    text=f"3 дня ({fmt(3)})",
+                    callback_data="slot_lead:3"
+                ),
+                InlineKeyboardButton(
+                    text=f"5 дней ({fmt(5)})",
+                    callback_data="slot_lead:5"
+                ),
             ],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="slot_back:logistics")],
         ]
     )
 
     msg = await callback.message.answer(
-        "Шаг 6 из 7 — запас по времени.\n\nЗа сколько дней нужно начинать поиск перед датой слота?",
+        "Шаг 6 из 7 — запас по времени.\n\n"
+        "Это дата, начиная с которой будем искать слот.\n"
+        f"Дата смещена на выбранный период: +{period_days} дней.",
         reply_markup=kb,
     )
     await add_ui_message(state, msg.message_id)
