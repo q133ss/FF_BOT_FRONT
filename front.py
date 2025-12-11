@@ -1360,21 +1360,102 @@ async def cmd_wb_logout(message: Message, state: FSMContext) -> None:
     await _do_wb_logout(message, state, message.from_user.id)
 
 
-async def cmd_create_search(message: Message, state: FSMContext) -> None:
-    await clear_all_ui(message, state)
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="Коледино", callback_data="slot_wh:Коледино")],
-            [InlineKeyboardButton(text="Тула", callback_data="slot_wh:Тула")],
-            [InlineKeyboardButton(text="Электросталь", callback_data="slot_wh:Электросталь")],
-            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")],
-        ]
+async def on_warehouse_page(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+
+    _, page_str = callback.data.split(":")
+    page = int(page_str)
+
+    # Загружаем новую страницу
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"{BACKEND_URL}/warehouses",
+                params={"page": page, "limit": 10}
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        print("Error /warehouses:", e)
+        return
+
+    # Берём старый wh_map (может содержать данные прошлых страниц)
+    fs = await state.get_data()
+    old_map = fs.get("wh_map", {})
+
+    # Создаем map для новой страницы
+    new_map = {w["id"]: w["name"] for w in data["items"]}
+
+    # Объединяем, НЕ перезаписывая прежние данные
+    combined_map = {**old_map, **new_map}
+
+    # Сохраняем ВСЁ
+    await state.update_data(
+        wh_items=data["items"],
+        wh_page=data["page"],
+        wh_pages=data["pages"],
+        wh_map=combined_map,
     )
+
+    await clear_all_ui(callback.message, state)
+    await _render_warehouse_page(callback.message, state)
+
+async def _render_warehouse_page(message: Message, state: FSMContext):
+    data = await state.get_data()
+    items = data.get("wh_items", [])
+    page = data.get("wh_page", 0)
+    pages = data.get("wh_pages", 1)
+
+    rows = []
+    for w in items:
+        rows.append([
+            InlineKeyboardButton(
+                text=w["name"],
+                callback_data=f"slot_wh_id:{w['id']}"
+            )
+        ])
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"wh_page:{page-1}"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"wh_page:{page+1}"))
+    if nav:
+        rows.append(nav)
+
+    rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
+
     msg = await message.answer(
-        "Шаг 1 из 7 — выбор склада.\n\nВыбери склад, для которого будем искать слоты:",
+        "Шаг 1 из 7 — выбор склада.\n\nВыбери склад:",
         reply_markup=kb,
     )
     await add_ui_message(state, msg.message_id)
+
+async def cmd_create_search(message: Message, state: FSMContext) -> None:
+    await clear_all_ui(message, state)
+
+    # грузим первую страницу складов
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{BACKEND_URL}/warehouses", params={"page": 0, "limit": 10})
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        print("Error GET /warehouses:", e)
+        msg = await message.answer("Не удалось загрузить список складов.")
+        await add_ui_message(state, msg.message_id)
+        return
+
+    await state.update_data(
+        wh_items=data["items"],
+        wh_page=data["page"],
+        wh_pages=data["pages"],
+        wh_map={w["id"]: w["name"] for w in data["items"]}
+    )
+
+    await _render_warehouse_page(message, state)
     await state.set_state(SlotSearchState.warehouse)
 
 
@@ -2838,7 +2919,7 @@ async def on_autobook_choose_account(callback: CallbackQuery, state: FSMContext)
 async def on_slot_warehouse(callback: CallbackQuery, state: FSMContext) -> None:
     telegram_id = callback.from_user.id
 
-    # --- Проверяем авторизацию WB ---
+    # --- проверяем авторизацию WB ---
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(
@@ -2865,31 +2946,33 @@ async def on_slot_warehouse(callback: CallbackQuery, state: FSMContext) -> None:
     await clear_all_ui(callback.message, state)
 
     # ================================================================
-    # 1) ИЗВЛЕКАЕМ WAREHOUSE ИЗ CALLBACK — С ЗАЩИТОЙ ОТ ДВОЙНЫХ ВЫЗОВОВ
+    # 1) ПАРСИМ CALLBACK slot_wh_id:<id>
     # ================================================================
-    data_cb = callback.data or ""
-    parts = data_cb.split(":", 1)
-    warehouse = parts[1] if len(parts) == 2 and parts[1].strip() else None
-
-    # Получаем старый state
-    data = await state.get_data()
-
-    # Если callback содержит склад → обновляем
-    if warehouse:
-        await state.update_data(warehouse=warehouse)
-    else:
-        # Если callback пришёл пустой (второй вызов) → восстанавливаем из state
-        warehouse = data.get("warehouse")
-
-    # Если даже state не помог — ошибка
-    if not warehouse:
-        await callback.message.answer("Ошибка: склад не выбран. Попробуй снова.")
+    try:
+        _, wh_id_str = callback.data.split(":", 1)
+        wh_id = int(wh_id_str)
+    except Exception:
+        await callback.message.answer("Ошибка: неверный ID склада.")
         return
 
-    print("WAREHOUSE SAVED:", warehouse)
+    # ================================================================
+    # 2) ДОСТАЁМ ИМЯ СКЛАДА ИЗ FSM
+    # ================================================================
+    data = await state.get_data()
+    name_map = data.get("wh_map", {})  # словарь {id: name}
+
+    warehouse_name = name_map.get(wh_id)
+    if not warehouse_name:
+        await callback.message.answer("Ошибка: склад не найден. Попробуй снова.")
+        return
+
+    # сохраняем склад
+    await state.update_data(warehouse=warehouse_name)
+
+    print("WAREHOUSE SAVED:", warehouse_name)
 
     # ================================================================
-    # 2) ПОКАЗЫВАЕМ ШАГ «ВЫБОР ТИПА ПОСТАВКИ»
+    # 3) ПОКАЗЫВАЕМ ШАГ «ТИП ПОСТАВКИ»
     # ================================================================
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -3277,6 +3360,7 @@ async def main() -> None:
     dp.callback_query.register(on_slot_restart_callback, F.data.startswith("slot_restart:"))
     dp.callback_query.register(on_slot_delete, F.data.startswith("slot_delete:"))
     dp.callback_query.register(on_slot_warehouse, F.data.startswith("slot_wh:"))
+    dp.callback_query.register(on_slot_warehouse, F.data.startswith("slot_wh_id:"))
     dp.callback_query.register(on_slot_supply, F.data.startswith("slot_supply:"))
     dp.callback_query.register(on_slot_coef, F.data.startswith("slot_coef:"))
     dp.callback_query.register(on_slot_logistics, F.data.startswith("slot_log:"))
@@ -3355,6 +3439,7 @@ async def main() -> None:
     dp.callback_query.register(menu_logout_callback, F.data == "menu_logout")
     dp.callback_query.register(menu_help_callback, F.data == "menu_help")
     dp.callback_query.register(menu_main_callback, F.data == "menu_main")
+    dp.callback_query.register(on_warehouse_page, F.data.startswith("wh_page:"))
 
     await dp.start_polling(bot)
 
