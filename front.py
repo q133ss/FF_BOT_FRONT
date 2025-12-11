@@ -1211,7 +1211,7 @@ async def wb_auth_phone_step(message: Message, state: FSMContext) -> None:
 
     # --- отправляем запрос ---
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
+        async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(
                 f"{BACKEND_URL}/auth/start",
                 json={
@@ -3390,7 +3390,7 @@ async def on_slot_confirm(callback: CallbackQuery, state: FSMContext) -> None:
         "max_logistics_percent": max_logistics_coef_percent or 9999,
         "search_period_days": period_days if period_days is not None else 30,
         "lead_time_days": lead_time_days,
-        "weekdays_only": (weekdays_code == "weekdays"),
+        "weekdays": weekdays_code,
         "telegram_chat_id": telegram_id,
         "user_id": user_id,
     }
