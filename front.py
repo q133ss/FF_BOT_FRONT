@@ -3208,43 +3208,53 @@ async def on_slot_period(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(SlotSearchState.lead_time)
 
 
+def build_weekday_keyboard(selected: set[str]) -> InlineKeyboardMarkup:
+    names = [
+        ("mon", "Пн"),
+        ("tue", "Вт"),
+        ("wed", "Ср"),
+        ("thu", "Чт"),
+        ("fri", "Пт"),
+        ("sat", "Сб"),
+        ("sun", "Вс"),
+    ]
+
+    rows = []
+    for key, label in names:
+        mark = "✅" if key in selected else "❌"
+        rows.append([
+            InlineKeyboardButton(text=f"{label} {mark}", callback_data=f"slot_day:{key}")
+        ])
+
+    rows.append([InlineKeyboardButton(text="➡️ Готово", callback_data="slot_day:done")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="slot_back:lead")])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 async def on_slot_lead(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await clear_all_ui(callback.message, state)
 
-    data_cb = callback.data or ""
-    try:
-        _, raw = data_cb.split(":", 1)
-    except Exception:
-        await send_main_menu(callback.message, state)
-        return
-
-    mapping = {
-        "1": 1,
-        "2": 2,
-        "3": 3,
-        "5": 5,
-    }
+    # --- читаем выбранный lead_time
+    _, raw = callback.data.split(":", 1)
+    mapping = {"1": 1, "2": 2, "3": 3, "5": 5}
     lead_time_days = mapping.get(raw)
-    if raw not in mapping:
+    if lead_time_days is None:
         await send_main_menu(callback.message, state)
         return
 
     await state.update_data(lead_time_days=lead_time_days)
 
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="Каждый день", callback_data="slot_week:daily")],
-            [
-                InlineKeyboardButton(text="Только будни", callback_data="slot_week:weekdays"),
-                InlineKeyboardButton(text="Только выходные", callback_data="slot_week:weekends"),
-            ],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="slot_back:period")],
-        ]
-    )
+    # --- создаём данные: все дни включены по умолчанию
+    selected = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
+    await state.update_data(selected_days=selected)
+
+    kb = build_weekday_keyboard(selected)
 
     msg = await callback.message.answer(
-        "Шаг 7 из 7 — дни недели.\n\nВ какие дни можно сдавать поставку?",
+        "Шаг 7 из 7 — дни недели.\n\n"
+        "Выбери, в какие дни можно сдавать поставку:",
         reply_markup=kb,
     )
     await add_ui_message(state, msg.message_id)
@@ -3254,41 +3264,55 @@ async def on_slot_lead(callback: CallbackQuery, state: FSMContext) -> None:
 
 async def on_slot_week(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
-    await clear_all_ui(callback.message, state)
 
     data_cb = callback.data or ""
-    try:
-        _, code = data_cb.split(":", 1)
-    except Exception:
-        await send_main_menu(callback.message, state)
-        return
-
-    mapping = {
-        "daily": "daily",
-        "weekdays": "weekdays",
-        "weekends": "weekends",
-    }
-    weekdays = mapping.get(code)
-    if weekdays is None:
-        await send_main_menu(callback.message, state)
-        return
-
-    await state.update_data(weekdays=weekdays)
+    _, code = data_cb.split(":", 1)
 
     data = await state.get_data()
-    summary = build_slot_summary(data)
+    selected = set(data.get("selected_days", []))
 
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Создать задачу", callback_data="slot_confirm:create")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="slot_back:lead")],
-        ]
-    )
+    # ----------------------------
+    # Пользователь нажал "Готово"
+    # ----------------------------
+    if code == "done":
+        if selected == {"mon","tue","wed","thu","fri","sat","sun"}:
+            weekdays = "daily"
+        elif selected == {"mon","tue","wed","thu","fri"}:
+            weekdays = "weekdays"
+        elif selected == {"sat","sun"}:
+            weekdays = "weekends"
+        else:
+            weekdays = "custom:" + ",".join(sorted(selected))
 
-    msg = await callback.message.answer(summary, reply_markup=kb)
-    await add_ui_message(state, msg.message_id)
+        await state.update_data(weekdays=weekdays)
 
-    await state.set_state(SlotSearchState.confirm)
+        summary = build_slot_summary(await state.get_data())
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Создать задачу", callback_data="slot_confirm:create")],
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="slot_back:lead")],
+            ]
+        )
+
+        msg = await callback.message.answer(summary, reply_markup=kb)
+        await add_ui_message(state, msg.message_id)
+        await state.set_state(SlotSearchState.confirm)
+        return
+
+    # ----------------------------
+    # Тоггл дня
+    # ----------------------------
+    if code in selected:
+        selected.remove(code)
+    else:
+        selected.add(code)
+
+    await state.update_data(selected_days=selected)
+
+    # Перерисовка клавиатуры (очищать UI НЕЛЬЗЯ!)
+    kb = build_weekday_keyboard(selected)
+
+    await callback.message.edit_reply_markup(reply_markup=kb)
 
 
 async def on_slot_confirm(callback: CallbackQuery, state: FSMContext) -> None:
@@ -3400,6 +3424,7 @@ async def main() -> None:
     dp.callback_query.register(on_slot_lead, F.data.startswith("slot_lead:"))
     dp.callback_query.register(on_slot_week, F.data.startswith("slot_week:"))
     dp.callback_query.register(on_slot_confirm, F.data == "slot_confirm:create")
+    dp.callback_query.register(on_slot_week, F.data.startswith("slot_day:"))
     dp.callback_query.register(on_slot_tasks_page, F.data.startswith("slot_tasks_page:"))
     dp.callback_query.register(on_slot_tasks_main_menu, F.data == "slot_tasks_main_menu")
     dp.callback_query.register(on_slot_task_open, F.data.startswith("slot_task_open:"))
