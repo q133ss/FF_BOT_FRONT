@@ -1633,9 +1633,62 @@ async def menu_tasks_callback(callback: CallbackQuery, state: FSMContext) -> Non
     await _do_main_menu_my_searches(callback.message, state, callback.from_user.id)
 
 
-async def menu_autobook_callback(callback: CallbackQuery, state: FSMContext) -> None:
+async def menu_autobook_new_callback(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    await _do_main_menu_autobook_list(callback.message, state, callback.from_user.id)
+    await clear_all_ui(callback.message, state)
+
+    telegram_id = callback.from_user.id
+
+    # Загружаем список slot_requests
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"{BACKEND_URL}/slot-search/list",
+                params={"telegram_id": telegram_id},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            tasks = data.get("requests", [])
+    except Exception as e:
+        print("Error /slot-search/list:", e)
+        msg = await callback.message.answer("Не удалось загрузить список задач.")
+        await add_ui_message(state, msg.message_id)
+        return
+
+    if not tasks:
+        msg = await callback.message.answer(
+            "У тебя нет активных задач поиска слотов.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")]]
+            )
+        )
+        await add_ui_message(state, msg.message_id)
+        return
+
+    # Отрисовываем список
+    rows = []
+    for t in tasks:
+        tid = t["id"]
+        wh = t["warehouse"]
+        st = t["supply_type"]
+        rows.append([
+            InlineKeyboardButton(
+                text=f"#{tid} — {wh}, {st}",
+                callback_data=f"autobook_load:{tid}"
+            )
+        ])
+
+    rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
+
+    msg = await callback.message.answer(
+        "Выбери задачу для автобронирования:",
+        reply_markup=kb
+    )
+    await add_ui_message(state, msg.message_id)
+
+    await state.update_data(slot_requests=tasks)
 
 
 async def menu_auth_callback(callback: CallbackQuery, state: FSMContext) -> None:
@@ -3415,6 +3468,70 @@ async def on_slot_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     await _do_main_menu_my_searches(callback.message, state, telegram_id)
 
 
+async def on_autobook_load(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await clear_all_ui(callback.message, state)
+
+    telegram_id = callback.from_user.id
+
+    try:
+        _, tid_str = callback.data.split(":")
+        request_id = int(tid_str)
+    except:
+        await callback.message.answer("Некорректный ID задачи.")
+        return
+
+    # Получаем user_id через backend
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(
+                f"{BACKEND_URL}/users/get-id",
+                params={"telegram_id": telegram_id}
+            )
+            r.raise_for_status()
+            user_id = r.json().get("user_id")
+    except Exception:
+        await callback.message.answer("Не удалось получить user_id.")
+        return
+
+    # Показываем сообщение о загрузке
+    loading_msg = await callback.message.answer("⏳ Выполняю автобронирование… Подожди немного.")
+    await add_ui_message(state, loading_msg.message_id)
+
+    # Выполняем POST /supplies/load
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(
+                f"{BACKEND_URL}/supplies/load",
+                params={"user_id": user_id, "request_id": request_id, "debug": False}
+            )
+            resp.raise_for_status()
+            result = resp.json()
+    except Exception as e:
+        print("Error /supplies/load:", e)
+        msg = await callback.message.answer("Ошибка при создании поставки.")
+        await add_ui_message(state, msg.message_id)
+        return
+
+    # Готовим ответ
+    text = (
+        "✔️ Автобронирование выполнено!\n\n"
+        f"Склад: {result.get('warehouse')}\n"
+        f"Тип поставки: {result.get('supply_type')}\n"
+        f"Файл: {result.get('file_saved')}\n"
+        f"Выбранная дата: {result.get('chosen_date')}"
+    )
+
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")]
+        ]
+    )
+
+    msg = await callback.message.answer(text, reply_markup=kb)
+    await add_ui_message(state, msg.message_id)
+
+
 async def main() -> None:
     """
     Точка входа для бота.
@@ -3514,13 +3631,15 @@ async def main() -> None:
     dp.callback_query.register(on_slot_back, F.data.startswith("slot_back:"))
     dp.callback_query.register(menu_search_callback, F.data == "menu_search")
     dp.callback_query.register(menu_tasks_callback, F.data == "menu_tasks")
-    dp.callback_query.register(menu_autobook_callback, F.data == "menu_autobook")
+    dp.callback_query.register(menu_autobook_new_callback, F.data == "menu_autobook")
     dp.callback_query.register(menu_auth_callback, F.data == "menu_auth")
     dp.callback_query.register(menu_status_callback, F.data == "menu_status")
     dp.callback_query.register(menu_logout_callback, F.data == "menu_logout")
     dp.callback_query.register(menu_help_callback, F.data == "menu_help")
     dp.callback_query.register(menu_main_callback, F.data == "menu_main")
     dp.callback_query.register(on_warehouse_page, F.data.startswith("wh_page:"))
+    dp.callback_query.register(on_autobook_load, F.data.startswith("autobook_load:"))
+
 
     await dp.start_polling(bot)
 
