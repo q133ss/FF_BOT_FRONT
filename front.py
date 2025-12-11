@@ -4,6 +4,7 @@ from datetime import datetime, date, timedelta
 
 from dotenv import load_dotenv
 import httpx
+import json
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
@@ -131,7 +132,7 @@ def get_logistics_coef_keyboard() -> ReplyKeyboardMarkup:
 def build_slot_summary(data: dict) -> str:
     """
     Собирает человекочитаемую сводку параметров задачи поиска слота.
-    Ожидает в data поля: warehouse, supply_type, max_coef, period_days, lead_time_days, weekdays.
+    Ожидает в data поля: warehouse, supply_type, max_coef, period_days, lead_time_days, weekdays, max_logistics_coef_percent.
     """
     warehouse = data.get("warehouse")
     supply_type = data.get("supply_type")
@@ -140,11 +141,8 @@ def build_slot_summary(data: dict) -> str:
     lead_time_days = data.get("lead_time_days")
     weekdays_code = data.get("weekdays")
     max_logistics_coef_percent = data.get("max_logistics_coef_percent")
-    max_logistics_coef_percent = data.get("max_logistics_coef_percent")
-    max_logistics_coef_percent = data.get("max_logistics_coef_percent")
-    max_logistics_coef_percent = data.get("max_logistics_coef_percent")
-    max_logistics_coef_percent = data.get("max_logistics_coef_percent")
 
+    # Тип поставки
     supply_type_text = {
         "box": "Короба",
         "mono": "Монопаллеты",
@@ -152,13 +150,35 @@ def build_slot_summary(data: dict) -> str:
         "safe": "Суперсейф",
     }.get(supply_type, str(supply_type))
 
-    weekdays_text = {
-        "daily": "Каждый день",
-        "weekdays": "Только будни",
-        "weekends": "Только выходные",
-    }.get(weekdays_code, str(weekdays_code))
+    # Дни недели
+    ru_days = {
+        "mon": "пн",
+        "tue": "вт",
+        "wed": "ср",
+        "thu": "чт",
+        "fri": "пт",
+        "sat": "сб",
+        "sun": "вс",
+    }
 
+    if weekdays_code == "daily":
+        weekdays_text = "Каждый день"
+    elif weekdays_code == "weekdays":
+        weekdays_text = "Только будни (пн–пт)"
+    elif weekdays_code == "weekends":
+        weekdays_text = "Только выходные (сб–вс)"
+    elif isinstance(weekdays_code, str) and weekdays_code.startswith("custom:"):
+        # custom:mon,sat,sun,thu,tue → "пн, сб, вс, чт, вт"
+        raw = weekdays_code.split(":", 1)[1]
+        keys = [k for k in raw.split(",") if k]
+        weekdays_text = ", ".join(ru_days.get(k, k) for k in keys)
+    else:
+        weekdays_text = "-" if weekdays_code is None else str(weekdays_code)
+
+    # Период поиска
     period_text = "Не ограничивать" if period_days is None else f"{period_days} дней"
+
+    # Логистика
     if max_logistics_coef_percent is None:
         logistics_text = "Не ограничивать"
     else:
@@ -3374,6 +3394,10 @@ async def on_slot_confirm(callback: CallbackQuery, state: FSMContext) -> None:
         "telegram_chat_id": telegram_id,
         "user_id": user_id,
     }
+
+    print("\n===== SLOT SEARCH PAYLOAD =====")
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    print("================================\n")
 
     # 4) Отправка запроса
     try:
