@@ -146,7 +146,7 @@ def build_slot_summary(data: dict) -> str:
     supply_type_text = {
         "box": "Короба",
         "mono": "Монопаллеты",
-        "postal": "Почтовая паллета",
+        "postal": "Поштучная паллета",
         "safe": "Суперсейф",
     }.get(supply_type, str(supply_type))
 
@@ -872,7 +872,7 @@ async def _render_autobook_card(message: Message, state: FSMContext, autobook_id
     supply_type_text = {
         "box": "Короба",
         "mono": "Монопаллеты",
-        "postal": "Почтовая паллета",
+        "postal": "Поштучная паллета",
         "safe": "Суперсейф",
     }.get(supply_type, str(supply_type))
 
@@ -981,7 +981,7 @@ async def _send_slot_tasks_page(message: Message, state: FSMContext, page: int =
         supply_type_text = {
             "box": "Короба",
             "mono": "Монопаллеты",
-            "postal": "Почтовая паллета",
+            "postal": "Поштучная паллета",
             "safe": "Суперсейф",
         }.get(supply_type, str(supply_type))
 
@@ -1069,7 +1069,7 @@ async def _render_slot_task_card(message: Message, state: FSMContext, task_id: i
     supply_type_text = {
         "box": "Короба",
         "mono": "Монопаллеты",
-        "postal": "Почтовая паллета",
+        "postal": "Поштучная паллета",
         "safe": "Суперсейф",
     }.get(supply_type, str(supply_type))
 
@@ -2230,7 +2230,7 @@ async def on_autobook_from_search(callback: CallbackQuery, state: FSMContext) ->
     supply_type_text = {
         "box": "Короба",
         "mono": "Монопаллеты",
-        "postal": "Почтовая паллета",
+        "postal": "Поштучная паллета",
         "safe": "Суперсейф",
     }.get(supply_type, str(supply_type))
 
@@ -2614,7 +2614,7 @@ async def on_autobook_choose_draft(callback: CallbackQuery, state: FSMContext) -
     supply_type_text = {
         "box": "Короба",
         "mono": "Монопаллеты",
-        "postal": "Почтовая паллета",
+        "postal": "Поштучная паллета",
         "safe": "Суперсейф",
     }.get(supply_type, str(supply_type))
 
@@ -2815,7 +2815,7 @@ async def on_slot_back(callback: CallbackQuery, state: FSMContext) -> None:
                     InlineKeyboardButton(text="🟫 Монопаллеты", callback_data="slot_supply:mono"),
                 ],
                 [
-                    InlineKeyboardButton(text="✉️ Почтовая паллета", callback_data="slot_supply:postal"),
+                    InlineKeyboardButton(text="✉️ Поштучная паллета", callback_data="slot_supply:postal"),
                     InlineKeyboardButton(text="🛡 Суперсейф", callback_data="slot_supply:safe"),
                 ],
                 [InlineKeyboardButton(text="⬅️ Назад", callback_data="slot_back:warehouse")],
@@ -3054,7 +3054,7 @@ async def on_slot_warehouse(callback: CallbackQuery, state: FSMContext) -> None:
                 InlineKeyboardButton(text="🟫 Монопаллеты", callback_data="slot_supply:mono"),
             ],
             [
-                InlineKeyboardButton(text="✉️ Почтовая паллета", callback_data="slot_supply:postal"),
+                InlineKeyboardButton(text="✉️ Поштучная паллета", callback_data="slot_supply:postal"),
                 InlineKeyboardButton(text="🛡 Суперсейф", callback_data="slot_supply:safe"),
             ],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_main")],
@@ -3069,6 +3069,31 @@ async def on_slot_warehouse(callback: CallbackQuery, state: FSMContext) -> None:
     await add_ui_message(state, msg.message_id)
     await state.set_state(SlotSearchState.supply_type)
 
+
+
+def build_coef_keyboard(
+    start: int = 0,
+    end: int = 20,
+    per_row: int = 4,
+) -> InlineKeyboardMarkup:
+    buttons = [
+        InlineKeyboardButton(
+            text=f"x{i}",
+            callback_data=f"slot_coef:{i}",
+        )
+        for i in range(start, end + 1)
+    ]
+
+    keyboard = [
+        buttons[i:i + per_row]
+        for i in range(0, len(buttons), per_row)
+    ]
+
+    keyboard.append(
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="slot_back:warehouse")]
+    )
+
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
 async def on_slot_supply(callback: CallbackQuery, state: FSMContext) -> None:
@@ -3087,26 +3112,14 @@ async def on_slot_supply(callback: CallbackQuery, state: FSMContext) -> None:
 
     await state.update_data(supply_type=supply_type)
 
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="x0", callback_data="slot_coef:0"),
-                InlineKeyboardButton(text="x2", callback_data="slot_coef:2"),
-                InlineKeyboardButton(text="x3", callback_data="slot_coef:3"),
-            ],
-            [
-                InlineKeyboardButton(text="x5", callback_data="slot_coef:5"),
-                InlineKeyboardButton(text="x10", callback_data="slot_coef:10"),
-                InlineKeyboardButton(text="x20", callback_data="slot_coef:20"),
-            ],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="slot_back:warehouse")],
-        ]
-    )
+    kb = build_coef_keyboard(0, 20, per_row=4)
 
     msg = await callback.message.answer(
-        "Шаг 3 из 7 — максимальный коэффициент.\n\nВыбери максимальный коэффициент бронирования:",
+        "Шаг 3 из 7 — максимальный коэффициент.\n\n"
+        "Выбери максимальный коэффициент бронирования:",
         reply_markup=kb,
     )
+
     await add_ui_message(state, msg.message_id)
     await state.set_state(SlotSearchState.max_coef)
 
@@ -3271,9 +3284,14 @@ async def on_slot_period(callback: CallbackQuery, state: FSMContext) -> None:
     )
 
     msg = await callback.message.answer(
-        "Шаг 6 из 7 — запас по времени.\n\n"
-        "Это дата, начиная с которой будем искать слот.\n"
-        f"Дата смещена на выбранный период: +{period_days} дней.",
+        "Шаг 6 из 7 — Лид тайм поставки.\n\n"
+        "Укажите срок необходимый вам для подготовки отгрузки (лид- тайм):\n"
+        "Дата сдвигается ежедневно\n"
+        "Этот период - запас времени, который необходим вам, чтобы успеть сдать поставку\n"
+        "Поможет избежать поиска поставок, которые вы не сможете отгрузить\n"
+        "При выборе 0 дней, бот будет искать поставки день в день\n"
+        "WВ примет у вас поставку с тем же коэффициентом, если вы привезёте её в течении 24 часов после запланированной даты\n"
+        "Как правило самые низкие коэффициенты появляются за 0-2 дня до даты приемки, т.к. селлеры начинают массово отменять поставки, которые бронировали заранее.\n",
         reply_markup=kb,
     )
     await add_ui_message(state, msg.message_id)
