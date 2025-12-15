@@ -1670,10 +1670,30 @@ async def autobook_menu_create_callback(callback: CallbackQuery, state: FSMConte
     await add_ui_message(state, wait_msg.message_id)
 
     try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp_user = await client.get(
+                f"{BACKEND_URL}/users/get-id",
+                params={"telegram_id": telegram_id},
+            )
+            resp_user.raise_for_status()
+            user_id = resp_user.json().get("user_id")
+            if user_id is None:
+                raise ValueError("user_id is missing in /users/get-id response")
+    except Exception as e:
+        print("Error calling /users/get-id:", e)
+        await wait_msg.edit_text(
+            "Не удалось получить данные пользователя. Попробуй позже.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")]]
+            ),
+        )
+        return
+
+    try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(
                 f"{BACKEND_URL}/wb/overview",
-                params={"telegram_id": telegram_id},
+                params={"user_id": user_id},
             )
             resp.raise_for_status()
             overview = resp.json()
@@ -1690,7 +1710,11 @@ async def autobook_menu_create_callback(callback: CallbackQuery, state: FSMConte
     accounts = overview.get("accounts") or []
     drafts = overview.get("drafts") or []
 
-    await state.update_data(autobook_accounts=accounts, autobook_drafts=drafts)
+    await state.update_data(
+        autobook_accounts=accounts,
+        autobook_drafts=drafts,
+        autobook_user_id=user_id,
+    )
 
     if not accounts:
         await wait_msg.edit_text(
@@ -1925,10 +1949,12 @@ async def on_autobook_new_request(callback: CallbackQuery, state: FSMContext) ->
         ]
     )
 
+    user_id = data.get("autobook_user_id") or selected.get("user_id")
+
     await state.update_data(
         autobook_request=selected,
         autobook_new_payload={
-            "user_id": selected.get("user_id"),
+            "user_id": user_id,
             "seller_name": account_name,
             "draft_id": draft_id,
             "slot_request_id": req_id_int,
