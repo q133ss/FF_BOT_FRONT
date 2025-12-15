@@ -1953,6 +1953,26 @@ async def on_autobook_new_refresh(callback: CallbackQuery, state: FSMContext) ->
 
     await callback.answer()
     await callback.message.edit_text("Обновляем список аккаунтов...")
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp_sync = await client.post(
+                f"{BACKEND_URL}/wb/accounts/sync",
+                params={"user_id": user_id},
+                headers={"accept": "application/json"},
+                data="",
+            )
+            resp_sync.raise_for_status()
+    except Exception as e:
+        print("Error calling /wb/accounts/sync on refresh:", e)
+        await callback.message.edit_text(
+            "Не удалось обновить аккаунты. Попробуй позже.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")]]
+            ),
+        )
+        return
+
     await _autobook_render_accounts(callback.message, state, user_id)
 
 
