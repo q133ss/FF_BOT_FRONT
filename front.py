@@ -23,6 +23,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 
 PAGE_SIZE = 5
+HISTORY_PAGE_SIZE = 5
 AUTBOOK_PAGE_SIZE = 5
 MOVES_PAGE_SIZE = 5
 user_sessions = {} # ЗАМЕНИТЬ НА РЕАЛЬНУЮ БД
@@ -205,6 +206,20 @@ def build_slot_summary(data: dict) -> str:
         "Создать задачу на поиск слота с такими параметрами?",
     ]
     return "\n".join(summary_lines)
+
+
+async def _get_user_id(telegram_id: int) -> int | None:
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"{BACKEND_URL}/users/get-id",
+                params={"telegram_id": telegram_id},
+            )
+            resp.raise_for_status()
+            return resp.json().get("user_id")
+    except Exception as e:
+        print("Error calling /users/get-id:", e)
+        return None
 
 
 async def _autobook_add_message_id(message_obj: Message, state: FSMContext) -> None:
@@ -1508,34 +1523,147 @@ async def _do_main_menu_create_search(message: Message, state: FSMContext, teleg
     await cmd_create_search(message, state)
 
 
-async def _do_main_menu_my_searches(message: Message, state: FSMContext, telegram_id: int) -> None:
+async def _show_tasks_menu(message: Message, state: FSMContext) -> None:
     await clear_all_ui(message, state)
+
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Задачи по поиску", callback_data="tasks_history_search")],
+            [InlineKeyboardButton(text="Задачи по автоброни", callback_data="tasks_history_autobook")],
+            [InlineKeyboardButton(text="Назад", callback_data="menu_main")],
+        ]
+    )
+
+    msg = await message.answer("📋 Мои задачи\n\nВыбери нужный раздел:", reply_markup=kb)
+    await add_ui_message(state, msg.message_id)
+
+
+async def _render_tasks_history(
+    message: Message, state: FSMContext, telegram_id: int, req_type: str, page: int = 1
+) -> None:
+    await clear_all_ui(message, state)
+
+    user_id = await _get_user_id(telegram_id)
+    if not user_id:
+        kb_err = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="📋 Мои задачи", callback_data="menu_tasks")],
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")],
+            ]
+        )
+        msg_err = await message.answer(
+            "Не удалось определить пользователя. Попробуй позже.", reply_markup=kb_err
+        )
+        await add_ui_message(state, msg_err.message_id)
+        return
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(
-                f"{BACKEND_URL}/slot-search/list",
-                params={"telegram_id": telegram_id},
+                f"{BACKEND_URL}/requests/history",
+                params={
+                    "user_id": user_id,
+                    "req_type": req_type,
+                    "page": page,
+                    "page_size": HISTORY_PAGE_SIZE,
+                },
             )
             resp.raise_for_status()
-            resp_data = resp.json()
-            tasks = resp_data.get("requests", [])
+            data = resp.json()
     except Exception as e:
-        print("Error calling /slot-search/list:", e)
-        msg_err = await message.answer("Не удалось получить список задач. Попробуй позже.")
+        print("Error calling /requests/history:", e)
+        kb_err = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="↩️ Назад", callback_data="menu_tasks")],
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")],
+            ]
+        )
+        msg_err = await message.answer(
+            "Не удалось получить список задач. Попробуй позже.", reply_markup=kb_err
+        )
         await add_ui_message(state, msg_err.message_id)
         return
 
-    await state.update_data(slot_tasks=tasks, slot_tasks_page=0, slot_tasks_message_ids=[])
+    items = data.get("items") or []
+    total = data.get("total", len(items))
+    page_num = data.get("page") or page or 1
+    page_size = data.get("page_size") or HISTORY_PAGE_SIZE
 
-    await _clear_slot_tasks_messages(message, state)
-    await _send_slot_tasks_page(message, state, page=0)
-    await state.set_state(SlotTasksState.list)
+    total_pages = (total - 1) // page_size + 1 if total else 1
+    page_num = max(1, min(page_num, total_pages))
+
+    titles = {
+        "slot_search": "Задачи по поиску",
+        "auto_booking": "Задачи по автоброни",
+    }
+
+    lines = [f"📋 {titles.get(req_type, 'Задачи')}".strip(), f"Страница {page_num} из {total_pages}", ""]
+
+    if items:
+        if req_type == "slot_search":
+            for item in items:
+                item_id = item.get("id")
+                warehouse = item.get("warehouse") or "-"
+                supply_type = item.get("supply_type") or "-"
+                status = item.get("status") or "-"
+                found = item.get("found", 0)
+                period = item.get("period") or {}
+                period_from = period.get("from") or "-"
+                period_to = period.get("to") or "-"
+
+                lines.append(
+                    f"#{item_id} • {warehouse}, {supply_type} — статус: {status}, найдено: {found}"
+                )
+                lines.append(f"Период: {period_from} → {period_to}")
+                lines.append("")
+        else:
+            for item in items:
+                item_id = item.get("id")
+                seller = item.get("seller_name") or "-"
+                draft_id = item.get("draft_id") or "-"
+                created_at = item.get("created_at") or "-"
+                lines.append(f"#{item_id} • {seller} — черновик {draft_id}")
+                lines.append(f"Создано: {created_at}")
+                lines.append("")
+    else:
+        lines.append("Пока нет задач этого типа.")
+
+    text = "\n".join(lines).rstrip()
+
+    kb_rows = []
+    nav_buttons = []
+
+    if page_num > 1:
+        nav_buttons.append(
+            InlineKeyboardButton(
+                text="◀️", callback_data=f"tasks_history_{req_type}_page:{page_num-1}"
+            )
+        )
+    if page_num < total_pages:
+        nav_buttons.append(
+            InlineKeyboardButton(
+                text="▶️", callback_data=f"tasks_history_{req_type}_page:{page_num+1}"
+            )
+        )
+
+    if nav_buttons:
+        kb_rows.append(nav_buttons)
+
+    kb_rows.append([InlineKeyboardButton(text="📋 Мои задачи", callback_data="menu_tasks")])
+    kb_rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
+    msg = await message.answer(text, reply_markup=kb)
+    await add_ui_message(state, msg.message_id)
+
+
+async def _do_main_menu_my_searches(message: Message, state: FSMContext, telegram_id: int) -> None:
+    await _render_tasks_history(message, state, telegram_id, "slot_search", page=1)
 
 
 async def handle_main_menu_my_searches(message: Message, state: FSMContext) -> None:
-    telegram_id = message.from_user.id
-    await _do_main_menu_my_searches(message, state, telegram_id)
+    await _show_tasks_menu(message, state)
 
 
 async def _do_main_menu_autobook_list(message: Message, state: FSMContext, telegram_id: int) -> None:
@@ -1649,7 +1777,40 @@ async def menu_search_callback(callback: CallbackQuery, state: FSMContext) -> No
 
 async def menu_tasks_callback(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
-    await _do_main_menu_my_searches(callback.message, state, callback.from_user.id)
+    await _show_tasks_menu(callback.message, state)
+
+
+async def tasks_history_search_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await _render_tasks_history(callback.message, state, callback.from_user.id, "slot_search", page=1)
+
+
+async def tasks_history_autobook_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await _render_tasks_history(callback.message, state, callback.from_user.id, "auto_booking", page=1)
+
+
+async def tasks_history_page_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    data_cb = callback.data or ""
+    try:
+        prefix, page_str = data_cb.split(":", 1)
+        page = int(page_str)
+    except Exception:
+        await callback.answer("Некорректная страница.", show_alert=True)
+        return
+
+    handled = False
+    if prefix.startswith("tasks_history_slot_search_page"):
+        await _render_tasks_history(callback.message, state, callback.from_user.id, "slot_search", page=page)
+        handled = True
+    elif prefix.startswith("tasks_history_auto_booking_page"):
+        await _render_tasks_history(callback.message, state, callback.from_user.id, "auto_booking", page=page)
+        handled = True
+
+    if handled:
+        await callback.answer()
+    else:
+        await callback.answer("Неизвестный тип задач.", show_alert=True)
 
 
 async def menu_autobook_new_callback(callback: CallbackQuery, state: FSMContext):
@@ -3180,7 +3341,7 @@ async def on_slot_auto(callback: CallbackQuery, state: FSMContext) -> None:
 
 async def on_menu_slot_tasks(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
-    await _do_main_menu_my_searches(callback.message, state, callback.from_user.id)
+    await _show_tasks_menu(callback.message, state)
 
 
 async def on_slot_back(callback: CallbackQuery, state: FSMContext) -> None:
@@ -4032,6 +4193,14 @@ async def main() -> None:
     dp.callback_query.register(on_slot_back, F.data.startswith("slot_back:"))
     dp.callback_query.register(menu_search_callback, F.data == "menu_search")
     dp.callback_query.register(menu_tasks_callback, F.data == "menu_tasks")
+    dp.callback_query.register(tasks_history_search_callback, F.data == "tasks_history_search")
+    dp.callback_query.register(tasks_history_autobook_callback, F.data == "tasks_history_autobook")
+    dp.callback_query.register(
+        tasks_history_page_callback, F.data.startswith("tasks_history_slot_search_page:")
+    )
+    dp.callback_query.register(
+        tasks_history_page_callback, F.data.startswith("tasks_history_auto_booking_page:")
+    )
     dp.callback_query.register(menu_autobook_new_callback, F.data == "menu_autobook")
     dp.callback_query.register(autobook_menu_list_callback, F.data == "autobook_menu:list")
     dp.callback_query.register(autobook_menu_create_callback, F.data == "autobook_menu:create")
