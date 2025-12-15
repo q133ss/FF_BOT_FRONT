@@ -1862,44 +1862,48 @@ async def autobook_menu_create_callback(callback: CallbackQuery, state: FSMConte
         )
         return
 
+    await _autobook_render_accounts(wait_msg, state, user_id)
+
+
+async def _autobook_render_accounts(message_obj: Message, state: FSMContext, user_id: int) -> None:
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(
-                f"{BACKEND_URL}/wb/overview",
-                params={"user_id": user_id},
+                f"{BACKEND_URL}/wb/accounts", params={"user_id": user_id}
             )
             resp.raise_for_status()
-            overview = resp.json()
+            accounts_resp = resp.json() or {}
     except Exception as e:
-        print("Error calling /wb/overview:", e)
-        await wait_msg.edit_text(
-            "Не удалось загрузить данные для автобронь. Попробуй позже.",
+        print("Error calling /wb/accounts:", e)
+        await message_obj.edit_text(
+            "Не удалось загрузить аккаунты. Попробуй позже.",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")]]
             ),
         )
         return
 
-    accounts = overview.get("accounts") or []
-    drafts = overview.get("drafts") or []
+    accounts = accounts_resp.get("items") or []
 
     await state.update_data(
         autobook_accounts=accounts,
-        autobook_drafts=drafts,
         autobook_user_id=user_id,
     )
 
     if not accounts:
-        await wait_msg.edit_text(
-            "Не найдено продавцов для автобронировния.",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")]]
-            ),
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Обновить", callback_data="autobook_new_refresh")],
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")],
+            ]
         )
-        await state.clear()
+        await message_obj.edit_text(
+            "Не найдено аккаунтов. Обнови список и попробуй снова.", reply_markup=kb
+        )
+        await state.set_state(AutoBookNewState.choose_account)
         return
 
-    text_lines = ["Атобронировние\n\nВыберите продавца:\n"]
+    text_lines = ["Атобронировние\n\nВыберите аккаунт:\n"]
     kb_rows = []
     for acc in accounts:
         acc_id = acc.get("id")
@@ -1909,11 +1913,46 @@ async def autobook_menu_create_callback(callback: CallbackQuery, state: FSMConte
             [InlineKeyboardButton(text=acc_name, callback_data=f"autobook_new_account:{acc_id}")]
         )
 
+    kb_rows.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="autobook_new_refresh")])
     kb_rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")])
     kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
-    await wait_msg.edit_text("\n".join(text_lines), reply_markup=kb)
+    try:
+        await message_obj.edit_text("\n".join(text_lines), reply_markup=kb)
+    except Exception:
+        prev_mid = message_obj.message_id
+        new_msg = await message_obj.answer("\n".join(text_lines), reply_markup=kb)
+        await add_ui_message(state, new_msg.message_id)
+        try:
+            await message_obj.bot.delete_message(chat_id=message_obj.chat.id, message_id=prev_mid)
+            await _drop_ui_message_id(state, prev_mid)
+        except Exception:
+            pass
+
     await state.set_state(AutoBookNewState.choose_account)
+
+
+async def on_autobook_new_refresh(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    user_id = data.get("autobook_user_id")
+
+    if user_id is None:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp_user = await client.get(
+                    f"{BACKEND_URL}/users/get-id",
+                    params={"telegram_id": callback.from_user.id},
+                )
+                resp_user.raise_for_status()
+                user_id = resp_user.json().get("user_id")
+        except Exception as e:
+            print("Error calling /users/get-id on refresh:", e)
+            await callback.answer("Не удалось обновить аккаунты.", show_alert=True)
+            return
+
+    await callback.answer()
+    await callback.message.edit_text("Обновляем список аккаунтов...")
+    await _autobook_render_accounts(callback.message, state, user_id)
 
 
 async def _autobook_send_drafts(message_obj: Message, state: FSMContext) -> None:
@@ -1977,12 +2016,71 @@ async def on_autobook_new_account(callback: CallbackQuery, state: FSMContext) ->
 
     data = await state.get_data()
     accounts = data.get("autobook_accounts") or []
+    user_id = data.get("autobook_user_id")
     selected = next((a for a in accounts if str(a.get("id")) == account_id), None)
+
     if not selected:
-        await callback.answer("Продавец не найден.", show_alert=True)
+        await callback.answer("Аккаунт не найден.", show_alert=True)
         return
 
-    await state.update_data(autobook_account=selected)
+    if user_id is None:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp_user = await client.get(
+                    f"{BACKEND_URL}/users/get-id",
+                    params={"telegram_id": callback.from_user.id},
+                )
+                resp_user.raise_for_status()
+                user_id = resp_user.json().get("user_id")
+        except Exception:
+            await callback.answer("Не удалось обновить пользователя.", show_alert=True)
+            return
+
+    try:
+        await callback.message.edit_text("Подождите..")
+    except Exception:
+        prev_mid = callback.message.message_id
+        loading_msg = await callback.message.answer("Подождите..")
+        await add_ui_message(state, loading_msg.message_id)
+        callback.message = loading_msg
+        try:
+            await callback.message.bot.delete_message(
+                chat_id=callback.message.chat.id, message_id=prev_mid
+            )
+            await _drop_ui_message_id(state, prev_mid)
+        except Exception:
+            pass
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(
+                f"{BACKEND_URL}/wb/overview",
+                params={"user_id": user_id, "seller_account_id": selected.get("id")},
+            )
+            resp.raise_for_status()
+            overview = resp.json() or {}
+    except Exception as e:
+        print("Error calling /wb/overview:", e)
+        await callback.message.edit_text(
+            "Не удалось загрузить данные для аккаунта. Попробуй позже.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")]]
+            ),
+        )
+        return
+
+    drafts = overview.get("drafts") or []
+    new_accounts = overview.get("accounts") or accounts
+    selected = next(
+        (a for a in new_accounts if str(a.get("id")) == account_id), selected
+    )
+
+    await state.update_data(
+        autobook_account=selected,
+        autobook_drafts=drafts,
+        autobook_accounts=new_accounts,
+        autobook_user_id=user_id,
+    )
     await callback.answer()
     await _autobook_send_drafts(callback.message, state)
 
@@ -4204,6 +4302,7 @@ async def main() -> None:
     dp.callback_query.register(menu_autobook_new_callback, F.data == "menu_autobook")
     dp.callback_query.register(autobook_menu_list_callback, F.data == "autobook_menu:list")
     dp.callback_query.register(autobook_menu_create_callback, F.data == "autobook_menu:create")
+    dp.callback_query.register(on_autobook_new_refresh, F.data == "autobook_new_refresh")
     dp.callback_query.register(on_autobook_new_account, F.data.startswith("autobook_new_account:"))
     dp.callback_query.register(on_autobook_new_draft, F.data.startswith("autobook_new_draft:"))
     dp.callback_query.register(on_autobook_new_request, F.data.startswith("autobook_new_request:"))
