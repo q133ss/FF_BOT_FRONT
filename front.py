@@ -1866,7 +1866,7 @@ async def autobook_menu_create_callback(callback: CallbackQuery, state: FSMConte
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 f"{BACKEND_URL}/wb/accounts/sync",
-                json={"user_id": user_id},
+                params={"user_id": user_id},
             )
             resp.raise_for_status()
             overview = resp.json()
@@ -1993,7 +1993,10 @@ async def on_autobook_new_account(callback: CallbackQuery, state: FSMContext) ->
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 f"{BACKEND_URL}/wb/accounts/sync",
-                json={"user_id": user_id, "seller_account_id": selected.get("wb_account_id")},
+                params={
+                    "user_id": user_id,
+                    "seller_account_id": selected.get("wb_account_id"),
+                },
             )
             resp.raise_for_status()
             overview = resp.json()
