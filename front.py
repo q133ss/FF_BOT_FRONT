@@ -1902,7 +1902,7 @@ async def autobook_menu_create_callback(callback: CallbackQuery, state: FSMConte
     text_lines = ["Атобронировние\n\nВыберите продавца:\n"]
     kb_rows = []
     for acc in accounts:
-        acc_id = acc.get("wb_account_id") or acc.get("id")
+        acc_id = acc.get("id") or acc.get("wb_account_id")
         acc_name = acc.get("name") or str(acc_id)
         text_lines.append(f"• {acc_name}")
         kb_rows.append(
@@ -1982,11 +1982,16 @@ async def on_autobook_new_account(callback: CallbackQuery, state: FSMContext) ->
         return
     accounts = data.get("autobook_accounts") or []
     selected = next(
-        (a for a in accounts if str(a.get("wb_account_id") or a.get("id")) == account_id),
+        (a for a in accounts if str(a.get("id") or a.get("wb_account_id")) == account_id),
         None,
     )
     if not selected:
         await callback.answer("Продавец не найден.", show_alert=True)
+        return
+
+    seller_account_id = selected.get("id") or selected.get("wb_account_id")
+    if seller_account_id is None:
+        await callback.answer("Не удалось определить продавца.", show_alert=True)
         return
 
     try:
@@ -1995,7 +2000,7 @@ async def on_autobook_new_account(callback: CallbackQuery, state: FSMContext) ->
                 f"{BACKEND_URL}/wb/accounts/sync",
                 params={
                     "user_id": user_id,
-                    "seller_account_id": selected.get("wb_account_id"),
+                    "seller_account_id": seller_account_id,
                 },
             )
             resp.raise_for_status()
