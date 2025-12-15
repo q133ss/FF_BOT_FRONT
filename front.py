@@ -26,6 +26,7 @@ PAGE_SIZE = 5
 HISTORY_PAGE_SIZE = 5
 AUTBOOK_PAGE_SIZE = 5
 MOVES_PAGE_SIZE = 5
+OVERVIEW_PAGE_SIZE = 10
 user_sessions = {} # ЗАМЕНИТЬ НА РЕАЛЬНУЮ БД
 
 # Загружаем переменные окружения
@@ -1958,6 +1959,15 @@ async def on_autobook_new_refresh(callback: CallbackQuery, state: FSMContext) ->
 async def _autobook_send_drafts(message_obj: Message, state: FSMContext) -> None:
     data = await state.get_data()
     drafts = data.get("autobook_drafts") or []
+    pagination = data.get("autobook_drafts_pagination") or {}
+    try:
+        page_num = int(pagination.get("page", 1))
+    except Exception:
+        page_num = 1
+    try:
+        total_pages = int(pagination.get("pages", 1))
+    except Exception:
+        total_pages = 1
 
     if not drafts:
         await message_obj.edit_text(
@@ -1969,7 +1979,9 @@ async def _autobook_send_drafts(message_obj: Message, state: FSMContext) -> None
         await state.clear()
         return
 
-    lines = ["Выберите черновик"]
+    lines = [
+        "Выберите черновик" + (f" (стр. {page_num} из {total_pages})" if total_pages else "")
+    ]
     kb_rows = []
     for draft in drafts:
         draft_id = draft.get("id")
@@ -1989,6 +2001,22 @@ async def _autobook_send_drafts(message_obj: Message, state: FSMContext) -> None
             ]
         )
 
+    nav_buttons = []
+    if page_num > 1:
+        nav_buttons.append(
+            InlineKeyboardButton(
+                text="◀️ Назад", callback_data=f"autobook_drafts_page:{page_num - 1}"
+            )
+        )
+    if total_pages and page_num < total_pages:
+        nav_buttons.append(
+            InlineKeyboardButton(
+                text="Вперед ▶️", callback_data=f"autobook_drafts_page:{page_num + 1}"
+            )
+        )
+    if nav_buttons:
+        kb_rows.append(nav_buttons)
+
     kb_rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")])
     kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
@@ -2006,10 +2034,26 @@ async def _autobook_send_drafts(message_obj: Message, state: FSMContext) -> None
     await state.set_state(AutoBookNewState.choose_draft)
 
 
+async def _fetch_overview_page(user_id: int, account_id: int, page: int) -> dict:
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.get(
+            f"{BACKEND_URL}/wb/overview",
+            params={
+                "user_id": user_id,
+                "seller_account_id": account_id,
+                "page": page,
+                "per_page": OVERVIEW_PAGE_SIZE,
+            },
+        )
+        resp.raise_for_status()
+        return resp.json() or {}
+
+
 async def on_autobook_new_account(callback: CallbackQuery, state: FSMContext) -> None:
     data_cb = callback.data or ""
     try:
         _, account_id = data_cb.split(":", 1)
+        account_id = int(account_id)
     except Exception:
         await callback.answer("Некорректный продавец.", show_alert=True)
         return
@@ -2017,7 +2061,7 @@ async def on_autobook_new_account(callback: CallbackQuery, state: FSMContext) ->
     data = await state.get_data()
     accounts = data.get("autobook_accounts") or []
     user_id = data.get("autobook_user_id")
-    selected = next((a for a in accounts if str(a.get("id")) == account_id), None)
+    selected = next((a for a in accounts if str(a.get("id")) == str(account_id)), None)
 
     if not selected:
         await callback.answer("Аккаунт не найден.", show_alert=True)
@@ -2052,13 +2096,11 @@ async def on_autobook_new_account(callback: CallbackQuery, state: FSMContext) ->
             pass
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(
-                f"{BACKEND_URL}/wb/overview",
-                params={"user_id": user_id, "seller_account_id": selected.get("id")},
-            )
-            resp.raise_for_status()
-            overview = resp.json() or {}
+        overview = await _fetch_overview_page(
+            user_id=user_id,
+            account_id=selected.get("id"),
+            page=1,
+        )
     except Exception as e:
         print("Error calling /wb/overview:", e)
         await callback.message.edit_text(
@@ -2071,8 +2113,9 @@ async def on_autobook_new_account(callback: CallbackQuery, state: FSMContext) ->
 
     drafts = overview.get("drafts") or []
     new_accounts = overview.get("accounts") or accounts
+    pagination = overview.get("pagination") or {}
     selected = next(
-        (a for a in new_accounts if str(a.get("id")) == account_id), selected
+        (a for a in new_accounts if str(a.get("id")) == str(account_id)), selected
     )
 
     await state.update_data(
@@ -2080,7 +2123,75 @@ async def on_autobook_new_account(callback: CallbackQuery, state: FSMContext) ->
         autobook_drafts=drafts,
         autobook_accounts=new_accounts,
         autobook_user_id=user_id,
+        autobook_drafts_page=pagination.get("page", 1),
+        autobook_drafts_pagination=pagination,
     )
+    await callback.answer()
+    await _autobook_send_drafts(callback.message, state)
+
+
+async def on_autobook_drafts_page(callback: CallbackQuery, state: FSMContext) -> None:
+    data_cb = callback.data or ""
+    try:
+        _, page_raw = data_cb.split(":", 1)
+        page = int(page_raw)
+    except Exception:
+        await callback.answer("Некорректная страница.", show_alert=True)
+        return
+
+    data = await state.get_data()
+    account = data.get("autobook_account") or {}
+    user_id = data.get("autobook_user_id")
+    account_id = account.get("id")
+
+    if user_id is None or account_id is None:
+        await callback.answer("Не хватает данных для обновления.", show_alert=True)
+        return
+
+    try:
+        await callback.message.edit_text("Подождите..")
+    except Exception:
+        prev_mid = callback.message.message_id
+        loading_msg = await callback.message.answer("Подождите..")
+        await add_ui_message(state, loading_msg.message_id)
+        callback.message = loading_msg
+        try:
+            await callback.message.bot.delete_message(
+                chat_id=callback.message.chat.id, message_id=prev_mid
+            )
+            await _drop_ui_message_id(state, prev_mid)
+        except Exception:
+            pass
+
+    try:
+        overview = await _fetch_overview_page(
+            user_id=user_id, account_id=account_id, page=page
+        )
+    except Exception as e:
+        print("Error calling /wb/overview:", e)
+        await callback.message.edit_text(
+            "Не удалось загрузить данные для аккаунта. Попробуй позже.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")]]
+            ),
+        )
+        return
+
+    drafts = overview.get("drafts") or []
+    pagination = overview.get("pagination") or {}
+    accounts = overview.get("accounts") or data.get("autobook_accounts") or []
+    selected = next(
+        (a for a in accounts if str(a.get("id")) == str(account_id)), account
+    )
+
+    await state.update_data(
+        autobook_drafts=drafts,
+        autobook_drafts_page=pagination.get("page", page),
+        autobook_drafts_pagination=pagination,
+        autobook_accounts=accounts,
+        autobook_account=selected,
+    )
+
     await callback.answer()
     await _autobook_send_drafts(callback.message, state)
 
@@ -4304,6 +4415,7 @@ async def main() -> None:
     dp.callback_query.register(autobook_menu_create_callback, F.data == "autobook_menu:create")
     dp.callback_query.register(on_autobook_new_refresh, F.data == "autobook_new_refresh")
     dp.callback_query.register(on_autobook_new_account, F.data.startswith("autobook_new_account:"))
+    dp.callback_query.register(on_autobook_drafts_page, F.data.startswith("autobook_drafts_page:"))
     dp.callback_query.register(on_autobook_new_draft, F.data.startswith("autobook_new_draft:"))
     dp.callback_query.register(on_autobook_new_request, F.data.startswith("autobook_new_request:"))
     dp.callback_query.register(on_autobook_new_confirm, F.data == "autobook_new_confirm")
