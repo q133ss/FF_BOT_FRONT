@@ -226,6 +226,18 @@ async def _autobook_clear_messages(message_obj: Message, state: FSMContext) -> N
     await state.update_data(autobook_message_ids=[])
 
 
+async def _drop_ui_message_id(state: FSMContext, mid: int) -> None:
+    data = await state.get_data()
+    modified = False
+    for key in ("ui_message_ids", "autobook_message_ids", "slot_tasks_message_ids"):
+        ids = data.get(key)
+        if ids and mid in ids:
+            data[key] = [i for i in ids if i != mid]
+            modified = True
+    if modified:
+        await state.update_data(**data)
+
+
 async def _clear_slot_tasks_messages(message_obj: Message, state: FSMContext) -> None:
     data = await state.get_data()
     ids = data.get("slot_tasks_message_ids") or []
@@ -1743,18 +1755,17 @@ async def autobook_menu_create_callback(callback: CallbackQuery, state: FSMConte
     await state.set_state(AutoBookNewState.choose_account)
 
 
-async def _autobook_send_drafts(message_obj, state: FSMContext) -> None:
+async def _autobook_send_drafts(message_obj: Message, state: FSMContext) -> None:
     data = await state.get_data()
     drafts = data.get("autobook_drafts") or []
 
     if not drafts:
-        msg = await message_obj.answer(
+        await message_obj.edit_text(
             "Не найдено черновиков для автобронирования.",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")]]
             ),
         )
-        await add_ui_message(state, msg.message_id)
         await state.clear()
         return
 
@@ -1781,8 +1792,17 @@ async def _autobook_send_drafts(message_obj, state: FSMContext) -> None:
     kb_rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")])
     kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
-    new_msg = await message_obj.answer("\n".join(lines), reply_markup=kb)
-    await add_ui_message(state, new_msg.message_id)
+    try:
+        await message_obj.edit_text("\n".join(lines), reply_markup=kb)
+    except Exception:
+        prev_mid = message_obj.message_id
+        new_msg = await message_obj.answer("\n".join(lines), reply_markup=kb)
+        await add_ui_message(state, new_msg.message_id)
+        try:
+            await message_obj.bot.delete_message(chat_id=message_obj.chat.id, message_id=prev_mid)
+            await _drop_ui_message_id(state, prev_mid)
+        except Exception:
+            pass
     await state.set_state(AutoBookNewState.choose_draft)
 
 
@@ -1826,8 +1846,20 @@ async def on_autobook_new_draft(callback: CallbackQuery, state: FSMContext) -> N
     await callback.answer()
 
     telegram_id = callback.from_user.id
-    loading_msg = await callback.message.answer("Подождите..")
-    await add_ui_message(state, loading_msg.message_id)
+    try:
+        await callback.message.edit_text("Подождите..")
+    except Exception:
+        prev_mid = callback.message.message_id
+        loading_msg = await callback.message.answer("Подождите..")
+        await add_ui_message(state, loading_msg.message_id)
+        callback.message = loading_msg
+        try:
+            await callback.message.bot.delete_message(
+                chat_id=callback.message.chat.id, message_id=prev_mid
+            )
+            await _drop_ui_message_id(state, prev_mid)
+        except Exception:
+            pass
 
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
@@ -1839,7 +1871,7 @@ async def on_autobook_new_draft(callback: CallbackQuery, state: FSMContext) -> N
             requests_data = resp.json() or []
     except Exception as e:
         print("Error calling /slots/requests:", e)
-        await loading_msg.edit_text(
+        await callback.message.edit_text(
             "Не удалось загрузить поиски. Попробуй позже.",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")]]
@@ -1848,7 +1880,7 @@ async def on_autobook_new_draft(callback: CallbackQuery, state: FSMContext) -> N
         return
 
     if not requests_data:
-        await loading_msg.edit_text(
+        await callback.message.edit_text(
             "У тебя нет доступных поисков слотов.",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")]]
@@ -1877,7 +1909,7 @@ async def on_autobook_new_draft(callback: CallbackQuery, state: FSMContext) -> N
     kb_rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")])
     kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
-    await loading_msg.edit_text("\n".join(lines), reply_markup=kb)
+    await callback.message.edit_text("\n".join(lines), reply_markup=kb)
     await state.update_data(autobook_requests=requests_data)
     await state.set_state(AutoBookNewState.choose_request)
 
@@ -1961,7 +1993,19 @@ async def on_autobook_new_request(callback: CallbackQuery, state: FSMContext) ->
         },
     )
 
-    await callback.message.answer("\n".join(summary_lines), reply_markup=kb)
+    try:
+        await callback.message.edit_text("\n".join(summary_lines), reply_markup=kb)
+    except Exception:
+        prev_mid = callback.message.message_id
+        new_msg = await callback.message.answer("\n".join(summary_lines), reply_markup=kb)
+        await add_ui_message(state, new_msg.message_id)
+        try:
+            await callback.message.bot.delete_message(
+                chat_id=callback.message.chat.id, message_id=prev_mid
+            )
+            await _drop_ui_message_id(state, prev_mid)
+        except Exception:
+            pass
     await callback.answer()
     await state.set_state(AutoBookNewState.confirm)
 
@@ -1987,16 +2031,37 @@ async def on_autobook_new_confirm(callback: CallbackQuery, state: FSMContext) ->
         return
 
     try:
+        await callback.message.bot.delete_message(
+            chat_id=callback.message.chat.id, message_id=callback.message.message_id
+        )
+        await _drop_ui_message_id(state, callback.message.message_id)
+    except Exception:
+        pass
+
+    status_msg = await callback.message.answer("Автобронирование в процессе, ждите!")
+    await add_ui_message(state, status_msg.message_id)
+
+    try:
         async with httpx.AsyncClient(timeout=20.0) as client:
             resp = await client.post(f"{BACKEND_URL}/wb/autobooking", json=payload)
             resp.raise_for_status()
     except Exception as e:
         print("Error calling /wb/autobooking:", e)
-        await _send_autobook_confirm_error(callback.message, state)
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="Повторить", callback_data="autobook_new_retry")],
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")],
+            ]
+        )
+        await status_msg.edit_text(
+            "Не удалось создать автобронь. Попробовать снова?", reply_markup=kb
+        )
         return
 
     await state.clear()
-    await callback.message.answer("Автобронирование в процессе, ждите!", reply_markup=get_main_menu_keyboard())
+    await status_msg.edit_text(
+        "Автобронирование в процессе, ждите!", reply_markup=get_main_menu_keyboard()
+    )
 
 
 async def on_autobook_new_retry(callback: CallbackQuery, state: FSMContext) -> None:
