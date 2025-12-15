@@ -1976,10 +1976,30 @@ async def on_autobook_new_account(callback: CallbackQuery, state: FSMContext) ->
         return
 
     data = await state.get_data()
+    user_id = data.get("autobook_user_id")
+    if user_id is None:
+        await callback.answer("Не удалось определить пользователя.", show_alert=True)
+        return
     accounts = data.get("autobook_accounts") or []
     selected = next((a for a in accounts if str(a.get("id")) == account_id), None)
     if not selected:
         await callback.answer("Продавец не найден.", show_alert=True)
+        return
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(
+                f"{BACKEND_URL}/wb/overview",
+                params={"user_id": user_id, "seller_account_id": selected.get("id")},
+            )
+            resp.raise_for_status()
+            overview = resp.json()
+            await state.update_data(
+                autobook_drafts=overview.get("drafts") or [],
+            )
+    except Exception as e:
+        print("Error calling /wb/overview:", e)
+        await callback.answer("Не удалось загрузить данные продавца.", show_alert=True)
         return
 
     await state.update_data(autobook_account=selected)
