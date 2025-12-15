@@ -65,6 +65,13 @@ class SlotTasksState(StatesGroup):
 class AutoBookTasksState(StatesGroup):
     list = State()
 
+
+class AutoBookNewState(StatesGroup):
+    choose_account = State()
+    choose_draft = State()
+    choose_request = State()
+    confirm = State()
+
 # Визард создания задачи перераспределения остатков
 class MoveWizardState(StatesGroup):
     choose_account = State()
@@ -1637,58 +1644,343 @@ async def menu_autobook_new_callback(callback: CallbackQuery, state: FSMContext)
     await callback.answer()
     await clear_all_ui(callback.message, state)
 
-    telegram_id = callback.from_user.id
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📋 Список автобронирований", callback_data="autobook_menu:list")],
+            [InlineKeyboardButton(text="➕ Создать автобронь", callback_data="autobook_menu:create")],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")],
+        ]
+    )
 
-    # Загружаем список slot_requests
+    msg = await callback.message.answer("🚀 Автобронь\n\nВыбери действие:", reply_markup=kb)
+    await add_ui_message(state, msg.message_id)
+
+
+async def autobook_menu_list_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await _do_main_menu_autobook_list(callback.message, state, callback.from_user.id)
+
+
+async def autobook_menu_create_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await clear_all_ui(callback.message, state)
+
+    telegram_id = callback.from_user.id
+    wait_msg = await callback.message.answer("Подождите..")
+    await add_ui_message(state, wait_msg.message_id)
+
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(
-                f"{BACKEND_URL}/slot-search/list",
+                f"{BACKEND_URL}/wb/overview",
                 params={"telegram_id": telegram_id},
             )
             resp.raise_for_status()
-            data = resp.json()
-            tasks = data.get("requests", [])
+            overview = resp.json()
     except Exception as e:
-        print("Error /slot-search/list:", e)
-        msg = await callback.message.answer("Не удалось загрузить список задач.")
-        await add_ui_message(state, msg.message_id)
-        return
-
-    if not tasks:
-        msg = await callback.message.answer(
-            "У тебя нет активных задач поиска слотов.",
+        print("Error calling /wb/overview:", e)
+        await wait_msg.edit_text(
+            "Не удалось загрузить данные для автобронь. Попробуй позже.",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")]]
-            )
+            ),
         )
-        await add_ui_message(state, msg.message_id)
         return
 
-    # Отрисовываем список
-    rows = []
-    for t in tasks:
-        tid = t["id"]
-        wh = t["warehouse"]
-        st = t["supply_type"]
-        rows.append([
-            InlineKeyboardButton(
-                text=f"#{tid} — {wh}, {st}",
-                callback_data=f"autobook_load:{tid}"
+    accounts = overview.get("accounts") or []
+    drafts = overview.get("drafts") or []
+
+    await state.update_data(autobook_accounts=accounts, autobook_drafts=drafts)
+
+    if not accounts:
+        await wait_msg.edit_text(
+            "Не найдено продавцов для автобронировния.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")]]
+            ),
+        )
+        await state.clear()
+        return
+
+    text_lines = ["Атобронировние\n\nВыберите продавца:\n"]
+    kb_rows = []
+    for acc in accounts:
+        acc_id = acc.get("id")
+        acc_name = acc.get("name") or str(acc_id)
+        text_lines.append(f"• {acc_name}")
+        kb_rows.append(
+            [InlineKeyboardButton(text=acc_name, callback_data=f"autobook_new_account:{acc_id}")]
+        )
+
+    kb_rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")])
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
+    await wait_msg.edit_text("\n".join(text_lines), reply_markup=kb)
+    await state.set_state(AutoBookNewState.choose_account)
+
+
+async def _autobook_send_drafts(message_obj, state: FSMContext) -> None:
+    data = await state.get_data()
+    drafts = data.get("autobook_drafts") or []
+
+    if not drafts:
+        msg = await message_obj.answer(
+            "Не найдено черновиков для автобронирования.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")]]
+            ),
+        )
+        await add_ui_message(state, msg.message_id)
+        await state.clear()
+        return
+
+    lines = ["Выберите черновик"]
+    kb_rows = []
+    for draft in drafts:
+        draft_id = draft.get("id")
+        created = draft.get("created_at")
+        barcode_qty = draft.get("barcode_quantity")
+        good_qty = draft.get("good_quantity")
+        author = draft.get("author")
+        lines.append(
+            f"• #{draft_id} от {created} — товаров: {good_qty}, баркодов: {barcode_qty}, автор: {author}"
+        )
+        kb_rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"#{draft_id} — {created} ({good_qty} шт.)",
+                    callback_data=f"autobook_new_draft:{draft_id}",
+                )
+            ]
+        )
+
+    kb_rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")])
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
+    new_msg = await message_obj.answer("\n".join(lines), reply_markup=kb)
+    await add_ui_message(state, new_msg.message_id)
+    await state.set_state(AutoBookNewState.choose_draft)
+
+
+async def on_autobook_new_account(callback: CallbackQuery, state: FSMContext) -> None:
+    data_cb = callback.data or ""
+    try:
+        _, account_id = data_cb.split(":", 1)
+    except Exception:
+        await callback.answer("Некорректный продавец.", show_alert=True)
+        return
+
+    data = await state.get_data()
+    accounts = data.get("autobook_accounts") or []
+    selected = next((a for a in accounts if str(a.get("id")) == account_id), None)
+    if not selected:
+        await callback.answer("Продавец не найден.", show_alert=True)
+        return
+
+    await state.update_data(autobook_account=selected)
+    await callback.answer()
+    await _autobook_send_drafts(callback.message, state)
+
+
+async def on_autobook_new_draft(callback: CallbackQuery, state: FSMContext) -> None:
+    data_cb = callback.data or ""
+    try:
+        _, draft_id = data_cb.split(":", 1)
+        draft_id_int = int(draft_id)
+    except Exception:
+        await callback.answer("Некорректный черновик.", show_alert=True)
+        return
+
+    data = await state.get_data()
+    drafts = data.get("autobook_drafts") or []
+    selected = next((d for d in drafts if d.get("id") == draft_id_int), None)
+    if not selected:
+        await callback.answer("Черновик не найден.", show_alert=True)
+        return
+
+    await state.update_data(autobook_draft=selected)
+    await callback.answer()
+
+    telegram_id = callback.from_user.id
+    loading_msg = await callback.message.answer("Подождите..")
+    await add_ui_message(state, loading_msg.message_id)
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.get(
+                f"{BACKEND_URL}/slots/requests",
+                params={"telegram_id": telegram_id},
             )
-        ])
+            resp.raise_for_status()
+            requests_data = resp.json() or []
+    except Exception as e:
+        print("Error calling /slots/requests:", e)
+        await loading_msg.edit_text(
+            "Не удалось загрузить поиски. Попробуй позже.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")]]
+            ),
+        )
+        return
 
-    rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")])
+    if not requests_data:
+        await loading_msg.edit_text(
+            "У тебя нет доступных поисков слотов.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")]]
+            ),
+        )
+        return
 
-    kb = InlineKeyboardMarkup(inline_keyboard=rows)
+    kb_rows = []
+    lines = ["Выберите поиск"]
+    for req in requests_data:
+        req_id = req.get("id")
+        warehouse = req.get("warehouse")
+        supply_type = req.get("supply_type")
+        period = req.get("period") or {}
+        period_text = f"{period.get('from')}–{period.get('to')}"
+        lines.append(f"• #{req_id} {warehouse}, {supply_type}, {period_text}")
+        kb_rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"#{req_id} — {warehouse}",
+                    callback_data=f"autobook_new_request:{req_id}",
+                )
+            ]
+        )
 
-    msg = await callback.message.answer(
-        "Выбери задачу для автобронирования:",
-        reply_markup=kb
+    kb_rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")])
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
+    await loading_msg.edit_text("\n".join(lines), reply_markup=kb)
+    await state.update_data(autobook_requests=requests_data)
+    await state.set_state(AutoBookNewState.choose_request)
+
+
+async def on_autobook_new_request(callback: CallbackQuery, state: FSMContext) -> None:
+    data_cb = callback.data or ""
+    try:
+        _, req_id = data_cb.split(":", 1)
+        req_id_int = int(req_id)
+    except Exception:
+        await callback.answer("Некорректный поиск.", show_alert=True)
+        return
+
+    data = await state.get_data()
+    requests_list = data.get("autobook_requests") or []
+    selected = next((r for r in requests_list if r.get("id") == req_id_int), None)
+    account = data.get("autobook_account") or {}
+    draft = data.get("autobook_draft") or {}
+
+    if not selected:
+        await callback.answer("Поиск не найден.", show_alert=True)
+        return
+
+    warehouse = selected.get("warehouse")
+    supply_type = selected.get("supply_type")
+    max_coef = selected.get("max_booking_coefficient")
+    logistics_percent = selected.get("max_logistics_percent")
+    lead_time = selected.get("lead_time_days")
+    period = selected.get("period") or {}
+    period_text = f"{period.get('from')} – {period.get('to')}"
+    supply_map = {
+        "box": "Короба",
+        "mono": "Монопаллеты",
+        "postal": "Поштучная паллета",
+        "safe": "Суперсейф",
+        "Монопаллеты": "Монопаллеты",
+    }
+    supply_text = supply_map.get(supply_type, str(supply_type))
+
+    account_name = account.get("name") or account.get("id")
+    draft_id = draft.get("id")
+    draft_created = draft.get("created_at")
+    draft_goods = draft.get("good_quantity")
+    draft_barcodes = draft.get("barcode_quantity")
+
+    summary_lines = [
+        "🚀 Автобронирование",
+        "",
+        f"Продавец: {account_name}",
+        f"Черновик #{draft_id} — от {draft_created}, товаров: {draft_goods}, баркодов: {draft_barcodes}",
+        "",
+        "Поиск:",
+        f"• Склад: {warehouse}",
+        f"• Тип поставки: {supply_text}",
+        f"• Коэффициент: {max_coef}",
+        f"• Логистика: {logistics_percent}%",
+        f"• Лид-тайм: {lead_time} дн.",
+        f"• Даты: {period_text}",
+        "",
+        "На следующем этапе я подготовлю поставки для каждого склада в вашем личном кабинете WB к бронированию",
+        "Пожалуйста, не удаляйте их - так я сэкономлю ~0.5 секунды на бронирование при появлении слота",
+        "После успешного бронировании лишние поставки будут удалены",
+    ]
+
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Продолжить", callback_data="autobook_new_confirm")],
+            [InlineKeyboardButton(text="Отмена", callback_data="autobook_new_cancel")],
+        ]
     )
+
+    await state.update_data(
+        autobook_request=selected,
+        autobook_new_payload={
+            "user_id": selected.get("user_id"),
+            "seller_name": account_name,
+            "draft_id": draft_id,
+            "slot_request_id": req_id_int,
+        },
+    )
+
+    await callback.message.answer("\n".join(summary_lines), reply_markup=kb)
+    await callback.answer()
+    await state.set_state(AutoBookNewState.confirm)
+
+
+async def _send_autobook_confirm_error(message_obj, state: FSMContext) -> None:
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Повторить", callback_data="autobook_new_retry")],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")],
+        ]
+    )
+    msg = await message_obj.answer("Не удалось создать автобронь. Попробовать снова?", reply_markup=kb)
     await add_ui_message(state, msg.message_id)
 
-    await state.update_data(slot_requests=tasks)
+
+async def on_autobook_new_confirm(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    data = await state.get_data()
+    payload = data.get("autobook_new_payload")
+
+    if not payload:
+        await _send_autobook_confirm_error(callback.message, state)
+        return
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.post(f"{BACKEND_URL}/wb/autobooking", json=payload)
+            resp.raise_for_status()
+    except Exception as e:
+        print("Error calling /wb/autobooking:", e)
+        await _send_autobook_confirm_error(callback.message, state)
+        return
+
+    await state.clear()
+    await callback.message.answer("Автобронирование в процессе, ждите!", reply_markup=get_main_menu_keyboard())
+
+
+async def on_autobook_new_retry(callback: CallbackQuery, state: FSMContext) -> None:
+    await on_autobook_new_confirm(callback, state)
+
+
+async def on_autobook_new_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await state.clear()
+    await send_main_menu(callback.message, state)
 
 
 async def menu_auth_callback(callback: CallbackQuery, state: FSMContext) -> None:
@@ -3650,6 +3942,14 @@ async def main() -> None:
     dp.callback_query.register(menu_search_callback, F.data == "menu_search")
     dp.callback_query.register(menu_tasks_callback, F.data == "menu_tasks")
     dp.callback_query.register(menu_autobook_new_callback, F.data == "menu_autobook")
+    dp.callback_query.register(autobook_menu_list_callback, F.data == "autobook_menu:list")
+    dp.callback_query.register(autobook_menu_create_callback, F.data == "autobook_menu:create")
+    dp.callback_query.register(on_autobook_new_account, F.data.startswith("autobook_new_account:"))
+    dp.callback_query.register(on_autobook_new_draft, F.data.startswith("autobook_new_draft:"))
+    dp.callback_query.register(on_autobook_new_request, F.data.startswith("autobook_new_request:"))
+    dp.callback_query.register(on_autobook_new_confirm, F.data == "autobook_new_confirm")
+    dp.callback_query.register(on_autobook_new_cancel, F.data == "autobook_new_cancel")
+    dp.callback_query.register(on_autobook_new_retry, F.data == "autobook_new_retry")
     dp.callback_query.register(menu_auth_callback, F.data == "menu_auth")
     dp.callback_query.register(menu_status_callback, F.data == "menu_status")
     dp.callback_query.register(menu_logout_callback, F.data == "menu_logout")
