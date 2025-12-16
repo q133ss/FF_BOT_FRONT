@@ -336,6 +336,18 @@ async def add_ui_message(state: FSMContext, mid: int):
     await state.update_data(ui_message_ids=ids)
 
 
+async def delete_ui_message(message: Message, state: FSMContext, mid: int):
+    try:
+        await message.bot.delete_message(chat_id=message.chat.id, message_id=mid)
+        data = await state.get_data()
+        ids = data.get("ui_message_ids", [])
+        if mid in ids:
+            ids = [stored_id for stored_id in ids if stored_id != mid]
+            await state.update_data(ui_message_ids=ids)
+    except Exception:
+        pass
+
+
 async def send_main_menu(message: Message, state: FSMContext) -> None:
     """
     Отрисовывает главное меню через inline-кнопки и очищает предыдущий UI.
@@ -1294,17 +1306,7 @@ async def wb_auth_phone_step(message: Message, state: FSMContext) -> None:
     await state.set_state(WbAuthState.wait_code)
 
     # удаляем сообщение ожидания
-    try:
-        await message.bot.delete_message(
-            chat_id=message.chat.id, message_id=waiting_msg.message_id
-        )
-        data = await state.get_data()
-        ids = data.get("ui_message_ids", [])
-        if waiting_msg.message_id in ids:
-            ids = [mid for mid in ids if mid != waiting_msg.message_id]
-            await state.update_data(ui_message_ids=ids)
-    except Exception:
-        pass
+    await delete_ui_message(message, state, waiting_msg.message_id)
 
     msg = await message.answer(
         "Отлично! Введи код из СМС.",
@@ -1337,8 +1339,12 @@ async def wb_auth_code_step(message: Message, state: FSMContext) -> None:
         await state.clear()
         return
 
+    waiting_msg = None
     try:
-        waiting_msg = await message.answer("Вводим код, подождите..", reply_markup=kb_main)
+        waiting_msg = await message.answer(
+            "Вводим код, подождите..",
+            reply_markup=ReplyKeyboardRemove(),
+        )
         await add_ui_message(state, waiting_msg.message_id)
 
         async with httpx.AsyncClient(timeout=15) as client:
@@ -1350,10 +1356,15 @@ async def wb_auth_code_step(message: Message, state: FSMContext) -> None:
             payload = resp.json()
             user_sessions[telegram_id] = session_id
     except Exception as e:
+        if waiting_msg:
+            await delete_ui_message(message, state, waiting_msg.message_id)
         print("Error calling /auth/code:", e)
         msg_err = await message.answer("Ошибка подтверждения кода. Попробуй снова.", reply_markup=kb_main)
         await add_ui_message(state, msg_err.message_id)
         return
+
+    if waiting_msg:
+        await delete_ui_message(message, state, waiting_msg.message_id)
 
     if payload.get("status") != "authorized":
         msg_err = await message.answer("Код неверный. Попробуй снова.", reply_markup=kb_main)
