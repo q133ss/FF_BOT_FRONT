@@ -1246,6 +1246,9 @@ async def wb_auth_phone_step(message: Message, state: FSMContext) -> None:
 
     # --- отправляем запрос ---
     try:
+        waiting_msg = await message.answer("Вводим номер, подождите..", reply_markup=kb_main)
+        await add_ui_message(state, waiting_msg.message_id)
+
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(
                 f"{BACKEND_URL}/auth/start",
@@ -1316,6 +1319,9 @@ async def wb_auth_code_step(message: Message, state: FSMContext) -> None:
         return
 
     try:
+        waiting_msg = await message.answer("Вводим код, подождите..", reply_markup=kb_main)
+        await add_ui_message(state, waiting_msg.message_id)
+
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
                 f"{BACKEND_URL}/auth/code",
