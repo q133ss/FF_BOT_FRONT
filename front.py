@@ -1246,7 +1246,10 @@ async def wb_auth_phone_step(message: Message, state: FSMContext) -> None:
 
     # --- отправляем запрос ---
     try:
-        waiting_msg = await message.answer("Вводим номер, подождите..", reply_markup=kb_main)
+        waiting_msg = await message.answer(
+            "Вводим номер, подождите..",
+            reply_markup=ReplyKeyboardRemove(),
+        )
         await add_ui_message(state, waiting_msg.message_id)
 
         async with httpx.AsyncClient(timeout=60) as client:
@@ -1290,7 +1293,23 @@ async def wb_auth_phone_step(message: Message, state: FSMContext) -> None:
     await state.update_data(phone=normalized, session_id=session_id)
     await state.set_state(WbAuthState.wait_code)
 
-    msg = await message.answer("Отлично! Введи код из СМС.", reply_markup=kb_main)
+    # удаляем сообщение ожидания
+    try:
+        await message.bot.delete_message(
+            chat_id=message.chat.id, message_id=waiting_msg.message_id
+        )
+        data = await state.get_data()
+        ids = data.get("ui_message_ids", [])
+        if waiting_msg.message_id in ids:
+            ids = [mid for mid in ids if mid != waiting_msg.message_id]
+            await state.update_data(ui_message_ids=ids)
+    except Exception:
+        pass
+
+    msg = await message.answer(
+        "Отлично! Введи код из СМС.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
     await add_ui_message(state, msg.message_id)
 
 
