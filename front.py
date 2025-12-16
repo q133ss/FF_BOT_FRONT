@@ -1423,12 +1423,20 @@ async def _do_wb_logout(message: Message, state: FSMContext, telegram_id: int) -
     async with httpx.AsyncClient() as client:
         try:
             resp = await client.post(
-                f"{BACKEND_URL}/wb/auth/logout",
+                f"{BACKEND_URL}/logout",
                 json={"telegram_id": telegram_id},
                 timeout=5.0,
             )
             if resp.status_code == 404:
                 msg = await message.answer("Ты и так не авторизован в WB.")
+                await add_ui_message(state, msg.message_id)
+                return
+            if resp.status_code == 422:
+                detail = resp.json().get("detail")
+                detail_text = "Неверные данные запроса." if detail is None else str(detail)
+                msg = await message.answer(
+                    f"Не удалось выполнить выход из WB: {detail_text}"
+                )
                 await add_ui_message(state, msg.message_id)
                 return
             resp.raise_for_status()
