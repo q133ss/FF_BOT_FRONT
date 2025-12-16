@@ -1659,8 +1659,22 @@ async def _render_tasks_history(
         "auto_booking": "Задачи по автоброни",
     }
 
-    lines = [f"📋 {titles.get(req_type, 'Задачи')}".strip(), f"Страница {page_num} из {total_pages}", ""]
+    await state.update_data(
+        **{
+            f"tasks_history_{req_type}": {
+                "items": items,
+                "page": page_num,
+                "total_pages": total_pages,
+            }
+        }
+    )
 
+    lines = [
+        f"📋 {titles.get(req_type, 'Задачи')}".strip(),
+        f"Страница {page_num} из {total_pages}",
+    ]
+
+    kb_rows = []
     if items:
         if req_type == "slot_search":
             for item in items:
@@ -1669,30 +1683,35 @@ async def _render_tasks_history(
                 supply_type = item.get("supply_type") or "-"
                 status = item.get("status") or "-"
                 found = item.get("found", 0)
-                period = item.get("period") or {}
-                period_from = period.get("from") or "-"
-                period_to = period.get("to") or "-"
-
-                lines.append(
-                    f"#{item_id} • {warehouse}, {supply_type} — статус: {status}, найдено: {found}"
+                button_text = f"#{item_id} • {warehouse}, {supply_type} — {status}, найдено: {found}"
+                kb_rows.append(
+                    [
+                        InlineKeyboardButton(
+                            text=button_text,
+                            callback_data=f"tasks_history_slot_search_open:{item_id}",
+                        )
+                    ]
                 )
-                lines.append(f"Период: {period_from} → {period_to}")
-                lines.append("")
         else:
             for item in items:
                 item_id = item.get("id")
                 seller = item.get("seller_name") or "-"
                 draft_id = item.get("draft_id") or "-"
                 created_at = item.get("created_at") or "-"
-                lines.append(f"#{item_id} • {seller} — черновик {draft_id}")
-                lines.append(f"Создано: {created_at}")
-                lines.append("")
+                button_text = f"#{item_id} • {seller} — черновик {draft_id}, создано: {created_at}"
+                kb_rows.append(
+                    [
+                        InlineKeyboardButton(
+                            text=button_text,
+                            callback_data=f"tasks_history_auto_booking_open:{item_id}",
+                        )
+                    ]
+                )
     else:
         lines.append("Пока нет задач этого типа.")
 
     text = "\n".join(lines).rstrip()
 
-    kb_rows = []
     nav_buttons = []
 
     if page_num > 1:
@@ -1717,6 +1736,144 @@ async def _render_tasks_history(
     kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
     msg = await message.answer(text, reply_markup=kb)
+    await add_ui_message(state, msg.message_id)
+
+
+async def _render_slot_history_detail(
+    message: Message, state: FSMContext, request_id: int
+) -> None:
+    await clear_all_ui(message, state)
+
+    data = await state.get_data()
+    history = data.get("tasks_history_slot_search") or {}
+    items = history.get("items") or []
+    item = next((i for i in items if i.get("id") == request_id), None)
+
+    if not item:
+        msg = await message.answer(
+            "Не удалось найти задачу. Попробуй обновить список.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="📋 Мои задачи", callback_data="menu_tasks")],
+                    [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")],
+                ]
+            ),
+        )
+        await add_ui_message(state, msg.message_id)
+        return
+
+    warehouse = item.get("warehouse") or "-"
+    supply_type = item.get("supply_type") or "-"
+    status = item.get("status") or "-"
+    found = item.get("found", 0)
+    period = item.get("period") or {}
+    period_from = period.get("from") or "-"
+    period_to = period.get("to") or "-"
+    lead_time = item.get("lead_time_days")
+    weekdays = item.get("weekdays") or "-"
+    max_coef = item.get("max_coef")
+    max_logistics = item.get("max_logistics_coef_percent")
+
+    supply_type_text = {
+        "box": "Короба",
+        "mono": "Монопаллеты",
+        "postal": "Поштучная паллета",
+        "safe": "Суперсейф",
+    }.get(supply_type, str(supply_type))
+
+    weekdays_text = {
+        "daily": "Ежедневно",
+        "weekdays": "Только будни",
+        "weekends": "Только выходные",
+    }.get(weekdays, str(weekdays))
+
+    lines = [
+        f"🔎 Задача поиска #{request_id}",
+        f"Склад: {warehouse}",
+        f"Тип поставки: {supply_type_text}",
+        f"Статус: {status}",
+        f"Найдено слотов: {found}",
+        f"Период: {period_from} → {period_to}",
+    ]
+
+    if lead_time is not None:
+        lines.append(f"Лид-тайм: {lead_time} дн.")
+    if weekdays_text:
+        lines.append(f"Дни недели: {weekdays_text}")
+    if max_coef is not None:
+        lines.append(f"Коэффициент приёмки: x{max_coef}")
+    if max_logistics is not None:
+        lines.append(f"Логистика: до {max_logistics}%")
+
+    kb_rows = []
+
+    if status == "pending":
+        kb_rows.append(
+            [
+                InlineKeyboardButton(
+                    text="⛔️ Отменить поиск",
+                    callback_data=f"tasks_history_slot_search_cancel:{request_id}",
+                )
+            ]
+        )
+
+    kb_rows.append(
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"tasks_history_slot_search_page:{history.get('page', 1)}")]
+    )
+    kb_rows.append([InlineKeyboardButton(text="📋 Мои задачи", callback_data="menu_tasks")])
+    kb_rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
+    msg = await message.answer("\n".join(lines), reply_markup=kb)
+    await add_ui_message(state, msg.message_id)
+
+
+async def _render_autobook_history_detail(
+    message: Message, state: FSMContext, request_id: int
+) -> None:
+    await clear_all_ui(message, state)
+
+    data = await state.get_data()
+    history = data.get("tasks_history_auto_booking") or {}
+    items = history.get("items") or []
+    item = next((i for i in items if i.get("id") == request_id), None)
+
+    if not item:
+        msg = await message.answer(
+            "Не удалось найти задачу автобронирования.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="📋 Мои задачи", callback_data="menu_tasks")],
+                    [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")],
+                ]
+            ),
+        )
+        await add_ui_message(state, msg.message_id)
+        return
+
+    seller = item.get("seller_name") or "-"
+    draft_id = item.get("draft_id") or "-"
+    created_at = item.get("created_at") or "-"
+    status = item.get("status") or "-"
+
+    lines = [
+        f"🤖 Задача автоброни #{request_id}",
+        f"Продавец: {seller}",
+        f"Черновик: {draft_id}",
+        f"Статус: {status}",
+        f"Создано: {created_at}",
+    ]
+
+    kb_rows = [
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"tasks_history_auto_booking_page:{history.get('page', 1)}")],
+        [InlineKeyboardButton(text="📋 Мои задачи", callback_data="menu_tasks")],
+        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")],
+    ]
+
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
+    msg = await message.answer("\n".join(lines), reply_markup=kb)
     await add_ui_message(state, msg.message_id)
 
 
@@ -1873,6 +2030,82 @@ async def tasks_history_page_callback(callback: CallbackQuery, state: FSMContext
         await callback.answer()
     else:
         await callback.answer("Неизвестный тип задач.", show_alert=True)
+
+
+async def tasks_history_slot_search_open_callback(
+    callback: CallbackQuery, state: FSMContext
+) -> None:
+    data_cb = callback.data or ""
+    try:
+        _, request_id_str = data_cb.split(":", 1)
+        request_id = int(request_id_str)
+    except Exception:
+        await callback.answer("Некорректная задача.", show_alert=True)
+        return
+
+    await callback.answer()
+    await _render_slot_history_detail(callback.message, state, request_id)
+
+
+async def tasks_history_autobook_open_callback(
+    callback: CallbackQuery, state: FSMContext
+) -> None:
+    data_cb = callback.data or ""
+    try:
+        _, request_id_str = data_cb.split(":", 1)
+        request_id = int(request_id_str)
+    except Exception:
+        await callback.answer("Некорректная задача.", show_alert=True)
+        return
+
+    await callback.answer()
+    await _render_autobook_history_detail(callback.message, state, request_id)
+
+
+async def tasks_history_slot_search_cancel_callback(
+    callback: CallbackQuery, state: FSMContext
+) -> None:
+    data_cb = callback.data or ""
+    try:
+        _, request_id_str = data_cb.split(":", 1)
+        request_id = int(request_id_str)
+    except Exception:
+        await callback.answer("Некорректная задача.", show_alert=True)
+        return
+
+    await callback.answer()
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(f"{BACKEND_URL}/slots/search/{request_id}/cancel")
+            resp.raise_for_status()
+    except Exception as e:
+        print(f"Error calling /slots/search/{request_id}/cancel:", e)
+        msg_err = await callback.message.answer(
+            "Не удалось отменить поиск. Попробуй позже.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="📋 Мои задачи", callback_data="menu_tasks")],
+                    [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")],
+                ]
+            ),
+        )
+        await add_ui_message(state, msg_err.message_id)
+        return
+
+    data = await state.get_data()
+    history = data.get("tasks_history_slot_search") or {}
+    items = history.get("items") or []
+    for i in items:
+        if i.get("id") == request_id:
+            i["status"] = "cancelled"
+            break
+
+    await state.update_data(
+        **{"tasks_history_slot_search": {**history, "items": items}}
+    )
+
+    await _render_slot_history_detail(callback.message, state, request_id)
 
 
 async def menu_autobook_new_callback(callback: CallbackQuery, state: FSMContext):
@@ -4544,6 +4777,18 @@ async def main() -> None:
     dp.callback_query.register(menu_tasks_callback, F.data == "menu_tasks")
     dp.callback_query.register(tasks_history_search_callback, F.data == "tasks_history_search")
     dp.callback_query.register(tasks_history_autobook_callback, F.data == "tasks_history_autobook")
+    dp.callback_query.register(
+        tasks_history_slot_search_open_callback,
+        F.data.startswith("tasks_history_slot_search_open:"),
+    )
+    dp.callback_query.register(
+        tasks_history_slot_search_cancel_callback,
+        F.data.startswith("tasks_history_slot_search_cancel:"),
+    )
+    dp.callback_query.register(
+        tasks_history_autobook_open_callback,
+        F.data.startswith("tasks_history_auto_booking_open:"),
+    )
     dp.callback_query.register(
         tasks_history_page_callback, F.data.startswith("tasks_history_slot_search_page:")
     )
