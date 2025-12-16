@@ -1,4 +1,5 @@
 import os
+import re
 import asyncio
 from datetime import datetime, date, timedelta
 
@@ -141,7 +142,8 @@ def get_logistics_coef_keyboard() -> ReplyKeyboardMarkup:
 def build_slot_summary(data: dict) -> str:
     """
     Собирает человекочитаемую сводку параметров задачи поиска слота.
-    Ожидает в data поля: warehouse, supply_type, max_coef, period_days, lead_time_days, weekdays, max_logistics_coef_percent.
+    Ожидает в data поля: warehouse, supply_type, max_coef, period_days, lead_time_days, weekdays,
+    max_logistics_coef_percent, search_period_from, search_period_to.
     """
     warehouse = data.get("warehouse")
     supply_type = data.get("supply_type")
@@ -149,6 +151,8 @@ def build_slot_summary(data: dict) -> str:
     period_days = data.get("period_days")
     lead_time_days = data.get("lead_time_days")
     weekdays_code = data.get("weekdays")
+    search_period_from = data.get("search_period_from")
+    search_period_to = data.get("search_period_to")
     max_logistics_coef_percent = data.get("max_logistics_coef_percent")
 
     # Тип поставки
@@ -185,7 +189,20 @@ def build_slot_summary(data: dict) -> str:
         weekdays_text = "-" if weekdays_code is None else str(weekdays_code)
 
     # Период поиска
-    period_text = "Не ограничивать" if period_days is None else f"{period_days} дней"
+    def format_period(date_from: str | None, date_to: str | None) -> str:
+        try:
+            from_dt = datetime.fromisoformat(date_from).date() if date_from else None
+            to_dt = datetime.fromisoformat(date_to).date() if date_to else None
+        except ValueError:
+            from_dt = to_dt = None
+
+        if from_dt and to_dt:
+            return f"{from_dt.strftime('%d.%m.%Y')}–{to_dt.strftime('%d.%m.%Y')}"
+        if period_days is None:
+            return "-"
+        return f"{period_days} дней"
+
+    period_text = format_period(search_period_from, search_period_to)
 
     # Логистика
     if max_logistics_coef_percent is None:
@@ -3682,27 +3699,13 @@ async def on_slot_back(callback: CallbackQuery, state: FSMContext) -> None:
         await state.set_state(SlotSearchState.logistics)
     elif target == "period":
         await clear_all_ui(callback.message, state)
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="3 дня", callback_data="slot_period:3"),
-                    InlineKeyboardButton(text="7 дней", callback_data="slot_period:7"),
-                ],
-                [
-                    InlineKeyboardButton(text="10 дней", callback_data="slot_period:10"),
-                    InlineKeyboardButton(text="30 дней", callback_data="slot_period:30"),
-                ],
-                [
-                    InlineKeyboardButton(text="Не ограничивать", callback_data="slot_period:none"),
-                ],
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="slot_back:logistics")],
-            ]
-        )
+        kb = build_period_keyboard()
         msg = await callback.message.answer(
             "Шаг 5 из 7 — период поиска.\n\nНа сколько дней вперёд искать слоты?",
             reply_markup=kb,
         )
         await add_ui_message(state, msg.message_id)
+        await state.update_data(awaiting_manual_period=False)
         await state.set_state(SlotSearchState.period_days)
     elif target == "lead":
         await clear_all_ui(callback.message, state)
@@ -3899,6 +3902,25 @@ def build_coef_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
+def build_period_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="3 дня", callback_data="slot_period:3"),
+                InlineKeyboardButton(text="7 дней", callback_data="slot_period:7"),
+            ],
+            [
+                InlineKeyboardButton(text="10 дней", callback_data="slot_period:10"),
+                InlineKeyboardButton(text="30 дней", callback_data="slot_period:30"),
+            ],
+            [
+                InlineKeyboardButton(text="Ввести даты вручную", callback_data="slot_period:manual"),
+            ],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="slot_back:logistics")],
+        ]
+    )
+
+
 async def on_slot_supply(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await clear_all_ui(callback.message, state)
@@ -3991,24 +4013,9 @@ async def on_slot_logistics(callback: CallbackQuery, state: FSMContext) -> None:
 
     # сохраняем лимит логистики
     await state.update_data(max_logistics_coef_percent=max_logistics_coef_percent)
+    await state.update_data(awaiting_manual_period=False)
 
-    # кнопки периодов поиска
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="3 дня вперёд", callback_data="slot_period:3"),
-                InlineKeyboardButton(text="7 дней вперёд", callback_data="slot_period:7"),
-            ],
-            [
-                InlineKeyboardButton(text="10 дней вперёд", callback_data="slot_period:10"),
-                InlineKeyboardButton(text="30 дней вперёд", callback_data="slot_period:30"),
-            ],
-            [
-                InlineKeyboardButton(text="Не ограничивать", callback_data="slot_period:none"),
-            ],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="slot_back:logistics")],
-        ]
-    )
+    kb = build_period_keyboard()
 
     msg = await callback.message.answer(
         "Шаг 5 из 7 — период поиска.\n\nНа сколько дней вперёд искать слоты?",
@@ -4019,45 +4026,24 @@ async def on_slot_logistics(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(SlotSearchState.period_days)
 
 
-from datetime import date, timedelta
+def _get_lead_base_date(data: dict) -> date:
+    search_period_to = data.get("search_period_to")
+    if search_period_to:
+        try:
+            return datetime.fromisoformat(search_period_to).date()
+        except ValueError:
+            pass
 
-async def on_slot_period(callback: CallbackQuery, state: FSMContext) -> None:
-    await callback.answer()
-    await clear_all_ui(callback.message, state)
+    period_days = data.get("period_days") or 0
+    return date.today() + timedelta(days=period_days)
 
-    data_cb = callback.data or ""
-    try:
-        _, raw = data_cb.split(":", 1)
-    except Exception:
-        await send_main_menu(callback.message, state)
-        return
 
-    mapping = {
-        "3": 3,
-        "7": 7,
-        "10": 10,
-        "30": 30,
-        "none": None,
-    }
-
-    period_days = mapping.get(raw)
-    if raw not in mapping:
-        await send_main_menu(callback.message, state)
-        return
-
-    # сохраняем период
-    await state.update_data(period_days=period_days)
-
-    today = date.today()
-
-    # если None — считаем как 0
-    base_offset = period_days if period_days is not None else 0
-
-    # это дата, от которой начинаем отсчёт lead_time
-    base_date = today + timedelta(days=base_offset)
+async def _show_lead_time_step(message: Message, state: FSMContext) -> None:
+    await clear_all_ui(message, state)
+    data = await state.get_data()
+    base_date = _get_lead_base_date(data)
 
     def fmt(offset: int) -> str:
-        """base_date + offset"""
         return (base_date + timedelta(days=offset)).strftime("%d.%m")
 
     kb = InlineKeyboardMarkup(
@@ -4086,7 +4072,7 @@ async def on_slot_period(callback: CallbackQuery, state: FSMContext) -> None:
         ]
     )
 
-    msg = await callback.message.answer(
+    msg = await message.answer(
         "Шаг 6 из 7 — Лид тайм поставки.\n\n"
         "Укажите срок необходимый вам для подготовки отгрузки (лид- тайм):\n"
         "Дата сдвигается ежедневно\n"
@@ -4100,6 +4086,95 @@ async def on_slot_period(callback: CallbackQuery, state: FSMContext) -> None:
     await add_ui_message(state, msg.message_id)
 
     await state.set_state(SlotSearchState.lead_time)
+
+
+async def on_slot_period(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+
+    data_cb = callback.data or ""
+    try:
+        _, raw = data_cb.split(":", 1)
+    except Exception:
+        await send_main_menu(callback.message, state)
+        return
+
+    if raw == "manual":
+        text = (
+            "Отправьте сообщение с периодом ДД.ММ.ГГГГ-ДД.ММ.ГГГГ без пробелов\n"
+            "Дефис \"-\" обязателен\n"
+            "Пример: 01.01.2025-31.01.2025"
+        )
+        msg = await callback.message.answer(text)
+        await add_ui_message(state, msg.message_id)
+        await state.update_data(awaiting_manual_period=True)
+        await state.set_state(SlotSearchState.period_days)
+        return
+
+    mapping = {
+        "3": 3,
+        "7": 7,
+        "10": 10,
+        "30": 30,
+    }
+
+    period_days = mapping.get(raw)
+    if period_days is None:
+        await send_main_menu(callback.message, state)
+        return
+
+    today = date.today()
+    search_period_from = today.isoformat()
+    search_period_to = (today + timedelta(days=period_days)).isoformat()
+
+    await state.update_data(
+        period_days=period_days,
+        search_period_from=search_period_from,
+        search_period_to=search_period_to,
+        awaiting_manual_period=False,
+    )
+
+    await _show_lead_time_step(callback.message, state)
+
+
+async def on_slot_period_manual_input(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if not data.get("awaiting_manual_period"):
+        await message.answer("Пожалуйста, выбери период с помощью кнопок выше.")
+        return
+
+    raw = (message.text or "").strip()
+    pattern = r"^(\d{2})\.(\d{2})\.(\d{4})-(\d{2})\.(\d{2})\.(\d{4})$"
+    match = re.fullmatch(pattern, raw)
+    if not match:
+        msg = await message.answer(
+            "Неверный формат. Введите даты как ДД.ММ.ГГГГ-ДД.ММ.ГГГГ без пробелов."
+        )
+        await add_ui_message(state, msg.message_id)
+        return
+
+    try:
+        from_dt = datetime.strptime(".".join(match.group(1, 2, 3)), "%d.%m.%Y").date()
+        to_dt = datetime.strptime(".".join(match.group(4, 5, 6)), "%d.%m.%Y").date()
+    except ValueError:
+        msg = await message.answer("Не удалось распознать даты. Проверь формат и повтори попытку.")
+        await add_ui_message(state, msg.message_id)
+        return
+
+    if from_dt > to_dt:
+        msg = await message.answer("Дата начала должна быть не позже даты окончания периода.")
+        await add_ui_message(state, msg.message_id)
+        return
+
+    period_days = (to_dt - from_dt).days + 1
+
+    await state.update_data(
+        period_days=period_days,
+        search_period_from=from_dt.isoformat(),
+        search_period_to=to_dt.isoformat(),
+        awaiting_manual_period=False,
+    )
+
+    await _show_lead_time_step(message, state)
 
 
 def build_weekday_keyboard(selected: set[str]) -> InlineKeyboardMarkup:
@@ -4246,6 +4321,8 @@ async def on_slot_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     period_days = data.get("period_days")
     lead_time_days = data.get("lead_time_days")
     weekdays_code = data.get("weekdays")
+    search_period_from = data.get("search_period_from")
+    search_period_to = data.get("search_period_to")
     max_logistics_coef_percent = data.get("max_logistics_coef_percent")
 
     # → supply_type преобразуем в формат backend (русские названия)
@@ -4260,15 +4337,23 @@ async def on_slot_confirm(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.message.answer("Ошибка: склад не выбран.")
         return
 
+    if search_period_from is None:
+        search_period_from = date.today().isoformat()
+
+    if search_period_to is None:
+        offset = period_days if period_days is not None else 0
+        search_period_to = (date.today() + timedelta(days=offset)).isoformat()
+
     # 3) Формируем запрос /slots/search
     payload = {
         "warehouse": warehouse,
         "supply_type": supply_type_backend,
         "max_booking_coefficient": str(max_coef),
         "max_logistics_percent": max_logistics_coef_percent or 9999,
-        "search_period_days": period_days if period_days is not None else 30,
+        "search_period_from": search_period_from,
+        "search_period_to": search_period_to,
         "lead_time_days": lead_time_days,
-        "weekdays": weekdays_code,
+        "weekdays_only": False,
         "telegram_chat_id": telegram_id,
         "user_id": user_id,
     }
@@ -4378,6 +4463,7 @@ async def main() -> None:
 
     dp.message.register(wb_auth_phone_step, WbAuthState.wait_phone)
     dp.message.register(wb_auth_code_step, WbAuthState.wait_code)
+    dp.message.register(on_slot_period_manual_input, SlotSearchState.period_days)
     dp.callback_query.register(on_slot_cancel_callback, F.data.startswith("slot_cancel:"))
     dp.callback_query.register(on_slot_restart_callback, F.data.startswith("slot_restart:"))
     dp.callback_query.register(on_slot_delete, F.data.startswith("slot_delete:"))
