@@ -73,7 +73,13 @@ class AutoBookTasksState(StatesGroup):
 class AutoBookNewState(StatesGroup):
     choose_account = State()
     choose_draft = State()
-    choose_request = State()
+    warehouse = State()
+    supply_type = State()
+    max_coef = State()
+    logistics = State()
+    period_days = State()
+    lead_time = State()
+    weekdays = State()
     confirm = State()
 
 # Визард создания задачи перераспределения остатков
@@ -2494,6 +2500,62 @@ async def _autobook_send_drafts(message_obj: Message, state: FSMContext) -> None
     await state.set_state(AutoBookNewState.choose_draft)
 
 
+async def _autobook_render_warehouse_page(message_obj: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    items = data.get("autobook_wh_items") or []
+    page = data.get("autobook_wh_page", 0)
+    pages = data.get("autobook_wh_pages", 1)
+
+    rows = []
+    for w in items:
+        rows.append([
+            InlineKeyboardButton(
+                text=w.get("name"),
+                callback_data=f"autobook_wh_id:{w.get('id')}",
+            )
+        ])
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"autobook_wh_page:{page-1}"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"autobook_wh_page:{page+1}"))
+    if nav:
+        rows.append(nav)
+
+    rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
+
+    msg = await message_obj.answer(
+        "Шаг 1 из 7 — выбор склада.\n\nВыбери склад:", reply_markup=kb
+    )
+    await add_ui_message(state, msg.message_id)
+    await state.set_state(AutoBookNewState.warehouse)
+
+
+async def _autobook_load_warehouses(message_obj: Message, state: FSMContext) -> None:
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{BACKEND_URL}/warehouses", params={"page": 0, "limit": 10})
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        print("Error GET /warehouses for autobook:", e)
+        msg = await message_obj.answer("Не удалось загрузить список складов.")
+        await add_ui_message(state, msg.message_id)
+        return
+
+    await state.update_data(
+        autobook_wh_items=data.get("items"),
+        autobook_wh_page=data.get("page"),
+        autobook_wh_pages=data.get("pages"),
+        autobook_wh_map={w.get("id"): w.get("name") for w in data.get("items", [])},
+    )
+
+    await _autobook_render_warehouse_page(message_obj, state)
+
+
 async def _fetch_overview_page(user_id: int, account_id: int, page: int) -> dict:
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.get(
@@ -2507,6 +2569,548 @@ async def _fetch_overview_page(user_id: int, account_id: int, page: int) -> dict
         )
         resp.raise_for_status()
         return resp.json() or {}
+
+
+async def on_autobook_wh_page(callback: CallbackQuery, state: FSMContext) -> None:
+    data_cb = callback.data or ""
+    try:
+        _, page_raw = data_cb.split(":", 1)
+        page = int(page_raw)
+    except Exception:
+        await callback.answer("Некорректная страница.", show_alert=True)
+        return
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"{BACKEND_URL}/warehouses", params={"page": page, "limit": 10}
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        print("Error paging /warehouses for autobook:", e)
+        await callback.answer("Не удалось обновить список складов.", show_alert=True)
+        return
+
+    await state.update_data(
+        autobook_wh_items=data.get("items"),
+        autobook_wh_page=data.get("page", page),
+        autobook_wh_pages=data.get("pages", 1),
+        autobook_wh_map={w.get("id"): w.get("name") for w in data.get("items", [])},
+    )
+
+    await callback.answer()
+    await _autobook_render_warehouse_page(callback.message, state)
+
+
+async def on_autobook_warehouse(callback: CallbackQuery, state: FSMContext) -> None:
+    telegram_id = callback.from_user.id
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"{BACKEND_URL}/wb/auth/status",
+                params={"telegram_id": telegram_id},
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            authorized = bool(payload.get("authorized"))
+    except Exception as e:
+        print("Error checking WB auth for autobook:", e)
+        await callback.message.answer("Не удалось проверить авторизацию WB. Попробуй позже.")
+        await callback.answer()
+        return
+
+    if not authorized:
+        await callback.message.answer(
+            "Ты не авторизован в WB ❌\nПерейди в меню → Авторизация WB"
+        )
+        await callback.answer()
+        return
+
+    await callback.answer()
+    await clear_all_ui(callback.message, state)
+
+    try:
+        _, wh_id_str = callback.data.split(":", 1)
+        wh_id = int(wh_id_str)
+    except Exception:
+        await callback.message.answer("Ошибка: неверный ID склада.")
+        return
+
+    data = await state.get_data()
+    name_map = data.get("autobook_wh_map", {})
+
+    warehouse_name = name_map.get(wh_id)
+    if not warehouse_name:
+        await callback.message.answer("Ошибка: склад не найден. Попробуй снова.")
+        return
+
+    await state.update_data(warehouse=warehouse_name)
+
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📦 Короба", callback_data="autobook_supply:box"),
+                InlineKeyboardButton(text="🟫 Монопаллеты", callback_data="autobook_supply:mono"),
+            ],
+            [
+                InlineKeyboardButton(text="✉️ Поштучная паллета", callback_data="autobook_supply:postal"),
+                InlineKeyboardButton(text="🛡 Суперсейф", callback_data="autobook_supply:safe"),
+            ],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="autobook_back:warehouse")],
+        ]
+    )
+
+    msg = await callback.message.answer(
+        "Шаг 2 из 7 — тип поставки.\n\nВыбери один из вариантов:",
+        reply_markup=kb,
+    )
+
+    await add_ui_message(state, msg.message_id)
+    await state.set_state(AutoBookNewState.supply_type)
+
+
+async def on_autobook_back(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    target = (callback.data or "").split(":", 1)[-1]
+
+    if target == "warehouse":
+        await clear_all_ui(callback.message, state)
+        await _autobook_render_warehouse_page(callback.message, state)
+        return
+
+    if target == "supply":
+        await clear_all_ui(callback.message, state)
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="📦 Короба", callback_data="autobook_supply:box"),
+                    InlineKeyboardButton(text="🟫 Монопаллеты", callback_data="autobook_supply:mono"),
+                ],
+                [
+                    InlineKeyboardButton(text="✉️ Поштучная паллета", callback_data="autobook_supply:postal"),
+                    InlineKeyboardButton(text="🛡 Суперсейф", callback_data="autobook_supply:safe"),
+                ],
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="autobook_back:warehouse")],
+            ]
+        )
+        msg = await callback.message.answer(
+            "Шаг 2 из 7 — тип поставки.\n\nВыбери один из вариантов:",
+            reply_markup=kb,
+        )
+        await add_ui_message(state, msg.message_id)
+        await state.set_state(AutoBookNewState.supply_type)
+        return
+
+    if target == "coef":
+        await clear_all_ui(callback.message, state)
+        kb = build_coef_keyboard(0, 20, per_row=4, prefix="autobook_coef")
+        msg = await callback.message.answer(
+            "Шаг 3 из 7 — максимальный коэффициент.\n\nВыбери максимальный коэффициент бронирования:",
+            reply_markup=kb,
+        )
+        await add_ui_message(state, msg.message_id)
+        await state.set_state(AutoBookNewState.max_coef)
+        return
+
+    if target == "logistics":
+        await clear_all_ui(callback.message, state)
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="> 100%", callback_data="autobook_log:100"),
+                    InlineKeyboardButton(text="≤ 120%", callback_data="autobook_log:120"),
+                ],
+                [
+                    InlineKeyboardButton(text="≤ 140%", callback_data="autobook_log:140"),
+                    InlineKeyboardButton(text="≤ 160%", callback_data="autobook_log:160"),
+                ],
+                [
+                    InlineKeyboardButton(text="≤ 180%", callback_data="autobook_log:180"),
+                    InlineKeyboardButton(text="Не ограничивать", callback_data="autobook_log:none"),
+                ],
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="autobook_back:coef")],
+            ]
+        )
+        msg = await callback.message.answer(
+            "Шаг 4 из 7 — логистика.\n\n"
+            "Wildberries показывает для разных складов логистический коэффициент в процентах.\n"
+            "Выбери максимальный коэффициент логистики, который тебя устраивает:",
+            reply_markup=kb,
+        )
+        await add_ui_message(state, msg.message_id)
+        await state.set_state(AutoBookNewState.logistics)
+        return
+
+    if target == "period":
+        await clear_all_ui(callback.message, state)
+        await _autobook_show_period_step(callback.message, state)
+        return
+
+    if target == "lead":
+        await clear_all_ui(callback.message, state)
+        await _autobook_show_lead_time_step(callback.message, state)
+
+
+async def on_autobook_supply(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await clear_all_ui(callback.message, state)
+
+    data_cb = callback.data or ""
+    try:
+        _, supply_type = data_cb.split(":", 1)
+    except Exception:
+        supply_type = None
+
+    if not supply_type:
+        await send_main_menu(callback.message, state)
+        return
+
+    await state.update_data(supply_type=supply_type)
+
+    kb = build_coef_keyboard(0, 20, per_row=4, prefix="autobook_coef")
+
+    msg = await callback.message.answer(
+        "Шаг 3 из 7 — максимальный коэффициент.\n\n"
+        "Выбери максимальный коэффициент бронирования:",
+        reply_markup=kb,
+    )
+
+    await add_ui_message(state, msg.message_id)
+    await state.set_state(AutoBookNewState.max_coef)
+
+
+async def on_autobook_coef(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await clear_all_ui(callback.message, state)
+
+    try:
+        _, coef_str = callback.data.split(":", 1)
+        max_coef = int(coef_str)
+    except Exception:
+        await send_main_menu(callback.message, state)
+        return
+
+    await state.update_data(max_coef=max_coef)
+
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="> 100%", callback_data="autobook_log:100"),
+                InlineKeyboardButton(text="≤ 120%", callback_data="autobook_log:120"),
+            ],
+            [
+                InlineKeyboardButton(text="≤ 140%", callback_data="autobook_log:140"),
+                InlineKeyboardButton(text="≤ 160%", callback_data="autobook_log:160"),
+            ],
+            [
+                InlineKeyboardButton(text="≤ 180%", callback_data="autobook_log:180"),
+                InlineKeyboardButton(text="Не ограничивать", callback_data="autobook_log:none"),
+            ],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="autobook_back:coef")],
+        ]
+    )
+
+    msg = await callback.message.answer(
+        "Шаг 4 из 7 — логистика.\n\n"
+        "Wildberries показывает для разных складов логистический коэффициент в процентах.\n"
+        "Выбери максимальный коэффициент логистики, который тебя устраивает:",
+        reply_markup=kb,
+    )
+    await add_ui_message(state, msg.message_id)
+    await state.set_state(AutoBookNewState.logistics)
+
+
+async def _autobook_show_period_step(message_obj: Message, state: FSMContext) -> None:
+    kb = build_period_keyboard(prefix="autobook_period")
+    msg = await message_obj.answer(
+        "Шаг 5 из 7 — период поиска.\n\nНа сколько дней вперёд искать слоты?",
+        reply_markup=kb,
+    )
+    await add_ui_message(state, msg.message_id)
+    await state.update_data(awaiting_manual_period=False)
+    await state.set_state(AutoBookNewState.period_days)
+
+
+async def on_autobook_logistics(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+
+    data_cb = callback.data or ""
+    _, code = data_cb.split(":", 1)
+    mapping = {
+        "100": 100,
+        "120": 120,
+        "140": 140,
+        "160": 160,
+        "180": 180,
+        "none": None,
+    }
+    max_logistics_coef_percent = mapping.get(code)
+
+    await state.update_data(max_logistics_coef_percent=max_logistics_coef_percent)
+
+    await clear_all_ui(callback.message, state)
+    await _autobook_show_period_step(callback.message, state)
+
+
+async def on_autobook_period(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+
+    data_cb = callback.data or ""
+    try:
+        _, raw = data_cb.split(":", 1)
+    except Exception:
+        await send_main_menu(callback.message, state)
+        return
+
+    if raw == "manual":
+        text = (
+            "Отправьте сообщение с периодом ДД.ММ.ГГГГ-ДД.ММ.ГГГГ без пробелов\n"
+            "Дефис \"-\" обязателен\n"
+            "Пример: 01.01.2025-31.01.2025"
+        )
+        msg = await callback.message.answer(text)
+        await add_ui_message(state, msg.message_id)
+        await state.update_data(awaiting_manual_period=True)
+        await state.set_state(AutoBookNewState.period_days)
+        return
+
+    mapping = {
+        "3": 3,
+        "7": 7,
+        "10": 10,
+        "30": 30,
+    }
+
+    period_days = mapping.get(raw)
+    if period_days is None:
+        await send_main_menu(callback.message, state)
+        return
+
+    today = date.today()
+    search_period_from = today.isoformat()
+    search_period_to = (today + timedelta(days=period_days)).isoformat()
+
+    await state.update_data(
+        period_days=period_days,
+        search_period_from=search_period_from,
+        search_period_to=search_period_to,
+        awaiting_manual_period=False,
+    )
+
+    await _autobook_show_lead_time_step(callback.message, state)
+
+
+async def on_autobook_period_manual_input(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if not data.get("awaiting_manual_period"):
+        await message.answer("Пожалуйста, выбери период с помощью кнопок выше.")
+        return
+
+    raw = (message.text or "").strip()
+    pattern = r"^(\d{2})\.(\d{2})\.(\d{4})-(\d{2})\.(\d{2})\.(\d{4})$"
+    match = re.fullmatch(pattern, raw)
+    if not match:
+        msg = await message.answer(
+            "Неверный формат. Введите даты как ДД.ММ.ГГГГ-ДД.ММ.ГГГГ без пробелов."
+        )
+        await add_ui_message(state, msg.message_id)
+        return
+
+    try:
+        from_dt = datetime.strptime(".".join(match.group(1, 2, 3)), "%d.%m.%Y").date()
+        to_dt = datetime.strptime(".".join(match.group(4, 5, 6)), "%d.%m.%Y").date()
+    except ValueError:
+        msg = await message.answer("Не удалось распознать даты. Проверь формат и повтори попытку.")
+        await add_ui_message(state, msg.message_id)
+        return
+
+    if from_dt > to_dt:
+        msg = await message.answer("Дата начала должна быть не позже даты окончания периода.")
+        await add_ui_message(state, msg.message_id)
+        return
+
+    period_days = (to_dt - from_dt).days + 1
+
+    await state.update_data(
+        period_days=period_days,
+        search_period_from=from_dt.isoformat(),
+        search_period_to=to_dt.isoformat(),
+        awaiting_manual_period=False,
+    )
+
+    await _autobook_show_lead_time_step(message, state)
+
+
+async def _autobook_show_lead_time_step(message: Message, state: FSMContext) -> None:
+    fmt = lambda days: (date.today() + timedelta(days=days)).strftime("%d.%m")
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"1 день ({fmt(1)})", callback_data="autobook_lead:1"
+                ),
+                InlineKeyboardButton(
+                    text=f"2 дня ({fmt(2)})", callback_data="autobook_lead:2"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"3 дня ({fmt(3)})", callback_data="autobook_lead:3"
+                ),
+                InlineKeyboardButton(
+                    text=f"5 дней ({fmt(5)})", callback_data="autobook_lead:5"
+                ),
+            ],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="autobook_back:period")],
+        ]
+    )
+
+    msg = await message.answer(
+        "Шаг 6 из 7 — Лид тайм поставки.\n\n"
+        "Укажите срок необходимый вам для подготовки отгрузки (лид- тайм):\n"
+        "Дата сдвигается ежедневно\n"
+        "Этот период - запас времени, который необходим вам, чтобы успеть сдать поставку\n"
+        "Поможет избежать поиска поставок, которые вы не сможете отгрузить\n"
+        "При выборе 0 дней, бот будет искать поставки день в день\n"
+        "WВ примет у вас поставку с тем же коэффициентом, если вы привезёте её в течении 24 часов после запланированной даты\n"
+        "Как правило самые низкие коэффициенты появляются за 0-2 дня до даты приемки, т.к. селлеры начинают массово отменять поставки, которые бронировали заранее.\n",
+        reply_markup=kb,
+    )
+    await add_ui_message(state, msg.message_id)
+
+    await state.set_state(AutoBookNewState.lead_time)
+
+
+async def on_autobook_lead(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await clear_all_ui(callback.message, state)
+
+    _, raw = callback.data.split(":", 1)
+    mapping = {"1": 1, "2": 2, "3": 3, "5": 5}
+    lead_time_days = mapping.get(raw)
+    if lead_time_days is None:
+        await send_main_menu(callback.message, state)
+        return
+
+    await state.update_data(lead_time_days=lead_time_days)
+
+    selected = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
+    await state.update_data(selected_days=selected)
+
+    kb = build_weekday_keyboard(selected, prefix="autobook_day", back_callback="autobook_back:lead")
+
+    msg = await callback.message.answer(
+        "Шаг 7 из 7 — дни недели.\n\n"
+        "Выбери, в какие дни можно сдавать поставку:",
+        reply_markup=kb,
+    )
+    await add_ui_message(state, msg.message_id)
+
+    await state.set_state(AutoBookNewState.weekdays)
+
+
+def build_autobook_manual_summary(data: dict) -> str:
+    account = data.get("autobook_account") or {}
+    draft = data.get("autobook_draft") or {}
+    account_name = account.get("name") or account.get("id")
+    draft_id = draft.get("id")
+    draft_created = draft.get("created_at")
+    draft_goods = draft.get("good_quantity")
+    draft_barcodes = draft.get("barcode_quantity")
+
+    slot_summary = build_slot_summary(data)
+
+    lines = [
+        "🚀 Автобронирование",
+        "",
+        f"Продавец: {account_name}",
+        f"Черновик #{draft_id} — от {draft_created}, товаров: {draft_goods}, баркодов: {draft_barcodes}",
+        "",
+        slot_summary,
+        "",
+        "На следующем этапе я подготовлю поставки для каждого склада в вашем личном кабинете WB к бронированию",
+        "Пожалуйста, не удаляйте их - так я сэкономлю ~0.5 секунды на бронирование при появлении слота",
+        "После успешного бронировании лишние поставки будут удалены",
+    ]
+
+    return "\n".join(lines)
+
+
+async def on_autobook_week(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+
+    data_cb = callback.data or ""
+    _, code = data_cb.split(":", 1)
+
+    data = await state.get_data()
+    selected = set(data.get("selected_days", []))
+
+    if code == "done":
+        if selected == {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}:
+            weekdays = "daily"
+        elif selected == {"mon", "tue", "wed", "thu", "fri"}:
+            weekdays = "weekdays"
+        elif selected == {"sat", "sun"}:
+            weekdays = "weekends"
+        else:
+            weekdays = "custom:" + ",".join(sorted(selected))
+
+        await state.update_data(weekdays=weekdays)
+
+        payload_source = await state.get_data()
+        search_period_from = payload_source.get("search_period_from") or date.today().isoformat()
+        search_period_to = payload_source.get("search_period_to")
+        if search_period_to is None:
+            offset = payload_source.get("period_days") or 0
+            search_period_to = (date.today() + timedelta(days=offset)).isoformat()
+
+        supply_type_backend = {
+            "box": "Короба",
+            "mono": "Монопаллеты",
+            "postal": "Поштучная паллета",
+            "safe": "Суперсейф",
+        }.get(payload_source.get("supply_type")) or payload_source.get("supply_type")
+
+        payload = {
+            "draft_id": (payload_source.get("autobook_draft") or {}).get("id"),
+            "lead_time_days": payload_source.get("lead_time_days"),
+            "period_from": search_period_from,
+            "period_to": search_period_to,
+            "seller_name": (payload_source.get("autobook_account") or {}).get("name"),
+            "supply_type": supply_type_backend,
+            "telegram_chat_id": callback.from_user.id,
+            "user_id": payload_source.get("autobook_user_id") or (payload_source.get("autobook_account") or {}).get("user_id"),
+            "warehouse": payload_source.get("warehouse"),
+            "weekdays": weekdays,
+        }
+
+        await state.update_data(autobook_new_payload=payload)
+
+        summary = build_autobook_manual_summary(await state.get_data())
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="Продолжить", callback_data="autobook_new_confirm")],
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="autobook_back:lead")],
+            ]
+        )
+
+        msg = await callback.message.answer(summary, reply_markup=kb)
+        await add_ui_message(state, msg.message_id)
+        await state.set_state(AutoBookNewState.confirm)
+        return
+
+    if code in selected:
+        selected.remove(code)
+    else:
+        selected.add(code)
+
+    await state.update_data(selected_days=selected)
+
+    kb = build_weekday_keyboard(selected, prefix="autobook_day", back_callback="autobook_back:lead")
+
+    await callback.message.edit_reply_markup(reply_markup=kb)
 
 
 async def on_autobook_new_account(callback: CallbackQuery, state: FSMContext) -> None:
@@ -2672,10 +3276,14 @@ async def on_autobook_new_draft(callback: CallbackQuery, state: FSMContext) -> N
         await callback.answer("Черновик не найден.", show_alert=True)
         return
 
-    await state.update_data(autobook_draft=selected)
+    await state.update_data(
+        autobook_draft=selected,
+        awaiting_manual_period=False,
+        selected_days=set(),
+        autobook_new_payload=None,
+    )
     await callback.answer()
 
-    telegram_id = callback.from_user.id
     try:
         await callback.message.edit_text("Загружаем список складов, подождите..")
     except Exception:
@@ -2691,57 +3299,7 @@ async def on_autobook_new_draft(callback: CallbackQuery, state: FSMContext) -> N
         except Exception:
             pass
 
-    try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            resp = await client.get(
-                f"{BACKEND_URL}/slots/requests",
-                params={"telegram_id": telegram_id},
-            )
-            resp.raise_for_status()
-            requests_data = resp.json() or []
-    except Exception as e:
-        print("Error calling /slots/requests:", e)
-        await callback.message.edit_text(
-            "Не удалось загрузить поиски. Попробуй позже.",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")]]
-            ),
-        )
-        return
-
-    if not requests_data:
-        await callback.message.edit_text(
-            "У тебя нет доступных поисков слотов.",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")]]
-            ),
-        )
-        return
-
-    kb_rows = []
-    lines = ["Выберите поиск"]
-    for req in requests_data:
-        req_id = req.get("id")
-        warehouse = req.get("warehouse")
-        supply_type = req.get("supply_type")
-        period = req.get("period") or {}
-        period_text = f"{period.get('from')}–{period.get('to')}"
-        lines.append(f"• #{req_id} {warehouse}, {supply_type}, {period_text}")
-        kb_rows.append(
-            [
-                InlineKeyboardButton(
-                    text=f"#{req_id} — {warehouse}",
-                    callback_data=f"autobook_new_request:{req_id}",
-                )
-            ]
-        )
-
-    kb_rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")])
-    kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
-
-    await callback.message.edit_text("\n".join(lines), reply_markup=kb)
-    await state.update_data(autobook_requests=requests_data)
-    await state.set_state(AutoBookNewState.choose_request)
+    await _autobook_load_warehouses(callback.message, state)
 
 
 async def on_autobook_new_request(callback: CallbackQuery, state: FSMContext) -> None:
@@ -2856,7 +3414,20 @@ async def on_autobook_new_confirm(callback: CallbackQuery, state: FSMContext) ->
     data = await state.get_data()
     payload = data.get("autobook_new_payload")
 
-    if not payload:
+    required_fields = [
+        "draft_id",
+        "lead_time_days",
+        "period_from",
+        "period_to",
+        "seller_name",
+        "supply_type",
+        "telegram_chat_id",
+        "user_id",
+        "warehouse",
+        "weekdays",
+    ]
+
+    if not payload or any(payload.get(f) in (None, "") for f in required_fields):
         await _send_autobook_confirm_error(callback.message, state)
         return
 
@@ -4272,11 +4843,12 @@ def build_coef_keyboard(
     start: int = 0,
     end: int = 20,
     per_row: int = 4,
+    prefix: str = "slot_coef",
 ) -> InlineKeyboardMarkup:
     buttons = [
         InlineKeyboardButton(
             text=f"x{i}",
-            callback_data=f"slot_coef:{i}",
+            callback_data=f"{prefix}:{i}",
         )
         for i in range(start, end + 1)
     ]
@@ -4288,26 +4860,35 @@ def build_coef_keyboard(
 
     keyboard.append(
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="slot_back:supply")]
+        if prefix == "slot_coef"
+        else [InlineKeyboardButton(text="⬅️ Назад", callback_data="autobook_back:supply")]
     )
 
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
-def build_period_keyboard() -> InlineKeyboardMarkup:
+def build_period_keyboard(prefix: str = "slot_period") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="3 дня", callback_data="slot_period:3"),
-                InlineKeyboardButton(text="7 дней", callback_data="slot_period:7"),
+                InlineKeyboardButton(text="3 дня", callback_data=f"{prefix}:3"),
+                InlineKeyboardButton(text="7 дней", callback_data=f"{prefix}:7"),
             ],
             [
-                InlineKeyboardButton(text="10 дней", callback_data="slot_period:10"),
-                InlineKeyboardButton(text="30 дней", callback_data="slot_period:30"),
+                InlineKeyboardButton(text="10 дней", callback_data=f"{prefix}:10"),
+                InlineKeyboardButton(text="30 дней", callback_data=f"{prefix}:30"),
             ],
             [
-                InlineKeyboardButton(text="Ввести даты вручную", callback_data="slot_period:manual"),
+                InlineKeyboardButton(text="Ввести даты вручную", callback_data=f"{prefix}:manual"),
             ],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="slot_back:logistics")],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Назад",
+                    callback_data=(
+                        "slot_back:logistics" if prefix == "slot_period" else "autobook_back:logistics"
+                    ),
+                )
+            ],
         ]
     )
 
@@ -4568,7 +5149,9 @@ async def on_slot_period_manual_input(message: Message, state: FSMContext) -> No
     await _show_lead_time_step(message, state)
 
 
-def build_weekday_keyboard(selected: set[str]) -> InlineKeyboardMarkup:
+def build_weekday_keyboard(
+    selected: set[str], prefix: str = "slot_day", back_callback: str = "slot_back:lead"
+) -> InlineKeyboardMarkup:
     names = [
         ("mon", "Пн"),
         ("tue", "Вт"),
@@ -4583,15 +5166,15 @@ def build_weekday_keyboard(selected: set[str]) -> InlineKeyboardMarkup:
     for key, label in names:
         mark = "✅" if key in selected else "⬜️"
         buttons.append(
-            InlineKeyboardButton(text=f"{label} {mark}", callback_data=f"slot_day:{key}")
+            InlineKeyboardButton(text=f"{label} {mark}", callback_data=f"{prefix}:{key}")
         )
 
     rows = []
     for i in range(0, len(buttons), 2):
         rows.append(buttons[i : i + 2])
 
-    rows.append([InlineKeyboardButton(text="➡️ Готово", callback_data="slot_day:done")])
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="slot_back:lead")])
+    rows.append([InlineKeyboardButton(text="➡️ Готово", callback_data=f"{prefix}:done")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_callback)])
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -4855,6 +5438,7 @@ async def main() -> None:
     dp.message.register(wb_auth_phone_step, WbAuthState.wait_phone)
     dp.message.register(wb_auth_code_step, WbAuthState.wait_code)
     dp.message.register(on_slot_period_manual_input, SlotSearchState.period_days)
+    dp.message.register(on_autobook_period_manual_input, AutoBookNewState.period_days)
     dp.callback_query.register(on_slot_cancel_callback, F.data.startswith("slot_cancel:"))
     dp.callback_query.register(on_slot_restart_callback, F.data.startswith("slot_restart:"))
     dp.callback_query.register(on_slot_delete, F.data.startswith("slot_delete:"))
@@ -4893,6 +5477,15 @@ async def main() -> None:
     dp.callback_query.register(moves_choose_from, F.data.startswith("moves_from:"))
     dp.callback_query.register(moves_choose_to, F.data.startswith("moves_to:"))
     dp.callback_query.register(on_autobook_task_chosen, F.data.startswith("autobook_task:"))
+    dp.callback_query.register(on_autobook_wh_page, F.data.startswith("autobook_wh_page:"))
+    dp.callback_query.register(on_autobook_warehouse, F.data.startswith("autobook_wh_id:"))
+    dp.callback_query.register(on_autobook_supply, F.data.startswith("autobook_supply:"))
+    dp.callback_query.register(on_autobook_coef, F.data.startswith("autobook_coef:"))
+    dp.callback_query.register(on_autobook_logistics, F.data.startswith("autobook_log:"))
+    dp.callback_query.register(on_autobook_period, F.data.startswith("autobook_period:"))
+    dp.callback_query.register(on_autobook_lead, F.data.startswith("autobook_lead:"))
+    dp.callback_query.register(on_autobook_week, F.data.startswith("autobook_day:"))
+    dp.callback_query.register(on_autobook_back, F.data.startswith("autobook_back:"))
     dp.callback_query.register(on_autobook_from_search, F.data.startswith("autobook_from_search:"))
     dp.callback_query.register(on_autobook_choose_account, F.data.startswith("autobook_choose_account:"))
     dp.callback_query.register(on_autobook_choose_draft, F.data.startswith("autobook_choose_draft:"))
@@ -4961,7 +5554,6 @@ async def main() -> None:
     dp.callback_query.register(on_autobook_new_account, F.data.startswith("autobook_new_account:"))
     dp.callback_query.register(on_autobook_drafts_page, F.data.startswith("autobook_drafts_page:"))
     dp.callback_query.register(on_autobook_new_draft, F.data.startswith("autobook_new_draft:"))
-    dp.callback_query.register(on_autobook_new_request, F.data.startswith("autobook_new_request:"))
     dp.callback_query.register(on_autobook_new_confirm, F.data == "autobook_new_confirm")
     dp.callback_query.register(on_autobook_new_cancel, F.data == "autobook_new_cancel")
     dp.callback_query.register(on_autobook_new_retry, F.data == "autobook_new_retry")
