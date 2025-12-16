@@ -4120,10 +4120,9 @@ def build_weekday_keyboard(selected: set[str]) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text=f"{label} {mark}", callback_data=f"slot_day:{key}")
         )
 
-    rows = [
-        buttons[:4],
-        buttons[4:],
-    ]
+    rows = []
+    for i in range(0, len(buttons), 2):
+        rows.append(buttons[i : i + 2])
 
     rows.append([InlineKeyboardButton(text="➡️ Готово", callback_data="slot_day:done")])
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="slot_back:lead")])
