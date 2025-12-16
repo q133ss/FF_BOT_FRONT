@@ -2134,7 +2134,7 @@ async def autobook_menu_create_callback(callback: CallbackQuery, state: FSMConte
     await clear_all_ui(callback.message, state)
 
     telegram_id = callback.from_user.id
-    wait_msg = await callback.message.answer("Подождите..")
+    wait_msg = await callback.message.answer("Загружаем ваши аккаунты, подождите..")
     await add_ui_message(state, wait_msg.message_id)
 
     try:
@@ -2395,10 +2395,10 @@ async def on_autobook_new_account(callback: CallbackQuery, state: FSMContext) ->
             return
 
     try:
-        await callback.message.edit_text("Подождите..")
+        await callback.message.edit_text("Загружаем ваши черновики, подождите..")
     except Exception:
         prev_mid = callback.message.message_id
-        loading_msg = await callback.message.answer("Подождите..")
+        loading_msg = await callback.message.answer("Загружаем ваши черновики, подождите..")
         await add_ui_message(state, loading_msg.message_id)
         callback.message = loading_msg
         try:
@@ -2463,10 +2463,10 @@ async def on_autobook_drafts_page(callback: CallbackQuery, state: FSMContext) ->
         return
 
     try:
-        await callback.message.edit_text("Подождите..")
+        await callback.message.edit_text("Загружаем список складов, подождите..")
     except Exception:
         prev_mid = callback.message.message_id
-        loading_msg = await callback.message.answer("Подождите..")
+        loading_msg = await callback.message.answer("Загружаем список складов, подождите..")
         await add_ui_message(state, loading_msg.message_id)
         callback.message = loading_msg
         try:
@@ -2531,10 +2531,10 @@ async def on_autobook_new_draft(callback: CallbackQuery, state: FSMContext) -> N
 
     telegram_id = callback.from_user.id
     try:
-        await callback.message.edit_text("Подождите..")
+        await callback.message.edit_text("Загружаем список складов, подождите..")
     except Exception:
         prev_mid = callback.message.message_id
-        loading_msg = await callback.message.answer("Подождите..")
+        loading_msg = await callback.message.answer("Загружаем список складов, подождите..")
         await add_ui_message(state, loading_msg.message_id)
         callback.message = loading_msg
         try:
