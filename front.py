@@ -3646,21 +3646,7 @@ async def on_slot_back(callback: CallbackQuery, state: FSMContext) -> None:
         await state.set_state(SlotSearchState.supply_type)
     elif target == "coef":
         await clear_all_ui(callback.message, state)
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="x1", callback_data="slot_coef:1"),
-                    InlineKeyboardButton(text="x2", callback_data="slot_coef:2"),
-                    InlineKeyboardButton(text="x3", callback_data="slot_coef:3"),
-                ],
-                [
-                    InlineKeyboardButton(text="x4", callback_data="slot_coef:4"),
-                    InlineKeyboardButton(text="x5", callback_data="slot_coef:5"),
-                    InlineKeyboardButton(text="x10", callback_data="slot_coef:10"),
-                ],
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="slot_back:warehouse")],
-            ]
-        )
+        kb = build_coef_keyboard(0, 20, per_row=4)
         msg = await callback.message.answer(
             "Шаг 3 из 7 — максимальный коэффициент.\n\nВыбери максимальный коэффициент бронирования:",
             reply_markup=kb,
@@ -3672,15 +3658,15 @@ async def on_slot_back(callback: CallbackQuery, state: FSMContext) -> None:
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
                 [
+                    InlineKeyboardButton(text="> 100%", callback_data="slot_log:100"),
                     InlineKeyboardButton(text="≤ 120%", callback_data="slot_log:120"),
+                ],
+                [
                     InlineKeyboardButton(text="≤ 140%", callback_data="slot_log:140"),
-                ],
-                [
                     InlineKeyboardButton(text="≤ 160%", callback_data="slot_log:160"),
-                    InlineKeyboardButton(text="≤ 180%", callback_data="slot_log:180"),
                 ],
                 [
-                    InlineKeyboardButton(text="≤ 200%", callback_data="slot_log:200"),
+                    InlineKeyboardButton(text="≤ 180%", callback_data="slot_log:180"),
                     InlineKeyboardButton(text="Не ограничивать", callback_data="slot_log:none"),
                 ],
                 [InlineKeyboardButton(text="⬅️ Назад", callback_data="slot_back:coef")],
@@ -3874,7 +3860,7 @@ async def on_slot_warehouse(callback: CallbackQuery, state: FSMContext) -> None:
                 InlineKeyboardButton(text="✉️ Поштучная паллета", callback_data="slot_supply:postal"),
                 InlineKeyboardButton(text="🛡 Суперсейф", callback_data="slot_supply:safe"),
             ],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_main")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="slot_back:warehouse")],
         ]
     )
 
@@ -3907,7 +3893,7 @@ def build_coef_keyboard(
     ]
 
     keyboard.append(
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="slot_back:warehouse")]
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="slot_back:supply")]
     )
 
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -3969,7 +3955,7 @@ async def on_slot_coef(callback: CallbackQuery, state: FSMContext) -> None:
                 InlineKeyboardButton(text="≤ 180%", callback_data="slot_log:180"),
                 InlineKeyboardButton(text="Не ограничивать", callback_data="slot_log:none"),
             ],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="slot_back:supply")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="slot_back:coef")],
         ]
     )
 
@@ -4020,7 +4006,7 @@ async def on_slot_logistics(callback: CallbackQuery, state: FSMContext) -> None:
             [
                 InlineKeyboardButton(text="Не ограничивать", callback_data="slot_period:none"),
             ],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="slot_back:coef")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="slot_back:logistics")],
         ]
     )
 
@@ -4096,7 +4082,7 @@ async def on_slot_period(callback: CallbackQuery, state: FSMContext) -> None:
                     callback_data="slot_lead:5"
                 ),
             ],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="slot_back:logistics")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="slot_back:period")],
         ]
     )
 
