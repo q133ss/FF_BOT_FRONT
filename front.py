@@ -2024,6 +2024,12 @@ async def tasks_history_page_callback(callback: CallbackQuery, state: FSMContext
         handled = True
     elif prefix.startswith("tasks_history_auto_booking_page"):
         await _render_tasks_history(callback.message, state, callback.from_user.id, "auto_booking", page=page)
+        handled = True
+
+    if handled:
+        await callback.answer()
+    else:
+        await callback.answer("Неизвестный тип задач.", show_alert=True)
 
 
 async def tasks_history_slot_search_open_callback(
@@ -2100,12 +2106,6 @@ async def tasks_history_slot_search_cancel_callback(
     )
 
     await _render_slot_history_detail(callback.message, state, request_id)
-        handled = True
-
-    if handled:
-        await callback.answer()
-    else:
-        await callback.answer("Неизвестный тип задач.", show_alert=True)
 
 
 async def menu_autobook_new_callback(callback: CallbackQuery, state: FSMContext):
