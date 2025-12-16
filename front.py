@@ -26,6 +26,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 PAGE_SIZE = 5
 HISTORY_PAGE_SIZE = 5
 AUTBOOK_PAGE_SIZE = 5
+AUTBOOK_ACCOUNTS_PAGE_SIZE = 5
 MOVES_PAGE_SIZE = 5
 OVERVIEW_PAGE_SIZE = 10
 user_sessions = {} # ЗАМЕНИТЬ НА РЕАЛЬНУЮ БД
@@ -2199,11 +2200,18 @@ async def autobook_menu_create_callback(callback: CallbackQuery, state: FSMConte
     await _autobook_render_accounts(wait_msg, state, user_id)
 
 
-async def _autobook_render_accounts(message_obj: Message, state: FSMContext, user_id: int) -> None:
+async def _autobook_render_accounts(
+    message_obj: Message, state: FSMContext, user_id: int, page: int = 1
+) -> None:
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(
-                f"{BACKEND_URL}/wb/accounts", params={"user_id": user_id}
+                f"{BACKEND_URL}/wb/accounts",
+                params={
+                    "user_id": user_id,
+                    "page": page,
+                    "per_page": AUTBOOK_ACCOUNTS_PAGE_SIZE,
+                },
             )
             resp.raise_for_status()
             accounts_resp = resp.json() or {}
@@ -2217,11 +2225,36 @@ async def _autobook_render_accounts(message_obj: Message, state: FSMContext, use
         )
         return
 
+    try:
+        page_num = int(accounts_resp.get("page", page))
+    except Exception:
+        page_num = page
+
+    try:
+        per_page = int(accounts_resp.get("per_page", AUTBOOK_ACCOUNTS_PAGE_SIZE))
+    except Exception:
+        per_page = AUTBOOK_ACCOUNTS_PAGE_SIZE
+
+    try:
+        total = int(accounts_resp.get("total", 0))
+    except Exception:
+        total = 0
+
+    total_pages = (total - 1) // per_page + 1 if total else 1
+    page_num = max(1, min(page_num, total_pages))
+
     accounts = accounts_resp.get("items") or []
 
     await state.update_data(
         autobook_accounts=accounts,
         autobook_user_id=user_id,
+        autobook_accounts_page=page_num,
+        autobook_accounts_pagination={
+            "page": page_num,
+            "per_page": per_page,
+            "total": total,
+            "pages": total_pages,
+        },
     )
 
     if not accounts:
@@ -2237,7 +2270,12 @@ async def _autobook_render_accounts(message_obj: Message, state: FSMContext, use
         await state.set_state(AutoBookNewState.choose_account)
         return
 
-    text_lines = ["Атобронировние\n\nВыберите аккаунт:\n"]
+    text_lines = [
+        "Атобронировние",
+        f"Страница {page_num} из {total_pages}",
+        "",
+        "Выберите аккаунт:\n",
+    ]
     kb_rows = []
     for acc in accounts:
         acc_id = acc.get("id")
@@ -2246,6 +2284,22 @@ async def _autobook_render_accounts(message_obj: Message, state: FSMContext, use
         kb_rows.append(
             [InlineKeyboardButton(text=acc_name, callback_data=f"autobook_new_account:{acc_id}")]
         )
+
+    nav_buttons = []
+    if page_num > 1:
+        nav_buttons.append(
+            InlineKeyboardButton(
+                text="◀️ Назад", callback_data=f"autobook_accounts_page:{page_num - 1}"
+            )
+        )
+    if page_num < total_pages:
+        nav_buttons.append(
+            InlineKeyboardButton(
+                text="Вперед ▶️", callback_data=f"autobook_accounts_page:{page_num + 1}"
+            )
+        )
+    if nav_buttons:
+        kb_rows.append(nav_buttons)
 
     kb_rows.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="autobook_new_refresh")])
     kb_rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")])
@@ -2269,6 +2323,12 @@ async def _autobook_render_accounts(message_obj: Message, state: FSMContext, use
 async def on_autobook_new_refresh(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     user_id = data.get("autobook_user_id")
+    page = data.get("autobook_accounts_page", 1)
+
+    try:
+        page = int(page)
+    except Exception:
+        page = 1
 
     if user_id is None:
         try:
@@ -2306,7 +2366,54 @@ async def on_autobook_new_refresh(callback: CallbackQuery, state: FSMContext) ->
         )
         return
 
-    await _autobook_render_accounts(callback.message, state, user_id)
+    await _autobook_render_accounts(callback.message, state, user_id, page=page)
+
+
+async def on_autobook_accounts_page(callback: CallbackQuery, state: FSMContext) -> None:
+    data_cb = callback.data or ""
+    try:
+        _, page_raw = data_cb.split(":", 1)
+        page = int(page_raw)
+    except Exception:
+        await callback.answer("Некорректная страница.", show_alert=True)
+        return
+
+    data = await state.get_data()
+    user_id = data.get("autobook_user_id")
+
+    if user_id is None:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp_user = await client.get(
+                    f"{BACKEND_URL}/users/get-id",
+                    params={"telegram_id": callback.from_user.id},
+                )
+                resp_user.raise_for_status()
+                user_id = resp_user.json().get("user_id")
+        except Exception:
+            await callback.answer("Не удалось получить пользователя.", show_alert=True)
+            return
+
+    await callback.answer()
+
+    try:
+        await callback.message.edit_text("Загружаем список аккаунтов, подождите..")
+    except Exception:
+        prev_mid = callback.message.message_id
+        loading_msg = await callback.message.answer(
+            "Загружаем список аккаунтов, подождите.."
+        )
+        await add_ui_message(state, loading_msg.message_id)
+        callback.message = loading_msg
+        try:
+            await callback.message.bot.delete_message(
+                chat_id=callback.message.chat.id, message_id=prev_mid
+            )
+            await _drop_ui_message_id(state, prev_mid)
+        except Exception:
+            pass
+
+    await _autobook_render_accounts(callback.message, state, user_id, page=page)
 
 
 async def _autobook_send_drafts(message_obj: Message, state: FSMContext) -> None:
@@ -4849,6 +4956,7 @@ async def main() -> None:
     dp.callback_query.register(menu_autobook_new_callback, F.data == "menu_autobook")
     dp.callback_query.register(autobook_menu_list_callback, F.data == "autobook_menu:list")
     dp.callback_query.register(autobook_menu_create_callback, F.data == "autobook_menu:create")
+    dp.callback_query.register(on_autobook_accounts_page, F.data.startswith("autobook_accounts_page:"))
     dp.callback_query.register(on_autobook_new_refresh, F.data == "autobook_new_refresh")
     dp.callback_query.register(on_autobook_new_account, F.data.startswith("autobook_new_account:"))
     dp.callback_query.register(on_autobook_drafts_page, F.data.startswith("autobook_drafts_page:"))
