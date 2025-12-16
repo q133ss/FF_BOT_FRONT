@@ -1406,10 +1406,12 @@ async def wb_auth_code_step(message: Message, state: FSMContext) -> None:
 
 
 
-async def _fetch_wb_auth_status() -> bool | None:
+async def _fetch_wb_auth_status(telegram_id: int) -> bool | None:
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(f"{BACKEND_URL}/wb/auth/status")
+            resp = await client.get(
+                f"{BACKEND_URL}/wb/auth/status", params={"telegram_id": telegram_id}
+            )
             resp.raise_for_status()
             payload = resp.json()
             return payload.get("authorized")
@@ -1419,7 +1421,7 @@ async def _fetch_wb_auth_status() -> bool | None:
 
 
 async def _do_wb_status(message: Message, state: FSMContext, telegram_id: int) -> None:
-    authorized = await _fetch_wb_auth_status()
+    authorized = await _fetch_wb_auth_status(telegram_id)
     if authorized is None:
         msg = await message.answer("Не удалось получить статус WB. Попробуй позже.")
         await add_ui_message(state, msg.message_id)
@@ -1441,7 +1443,7 @@ async def cmd_wb_status(message: Message, state: FSMContext) -> None:
 
 
 async def _do_wb_logout(message: Message, state: FSMContext, telegram_id: int) -> None:
-    authorized = await _fetch_wb_auth_status()
+    authorized = await _fetch_wb_auth_status(telegram_id)
     if authorized is False:
         msg = await message.answer(
             "Ты не авторизован в WB. Перейди в меню → Авторизация WB"
@@ -1992,7 +1994,7 @@ async def _do_main_menu_logout(message: Message, state: FSMContext, telegram_id:
 
 async def handle_main_menu_auth(message: Message, state: FSMContext) -> None:
     telegram_id = message.from_user.id
-    authorized = await _fetch_wb_auth_status()
+    authorized = await _fetch_wb_auth_status(telegram_id)
 
     if authorized:
         kb = InlineKeyboardMarkup(
@@ -2797,7 +2799,8 @@ async def on_autobook_new_cancel(callback: CallbackQuery, state: FSMContext) -> 
 
 async def menu_auth_callback(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
-    authorized = await _fetch_wb_auth_status()
+    telegram_id = callback.from_user.id
+    authorized = await _fetch_wb_auth_status(telegram_id)
 
     if authorized:
         kb = InlineKeyboardMarkup(
@@ -2825,7 +2828,8 @@ async def menu_status_callback(callback: CallbackQuery, state: FSMContext) -> No
     await callback.answer()
     await clear_all_ui(callback.message, state)
 
-    authorized = await _fetch_wb_auth_status()
+    telegram_id = callback.from_user.id
+    authorized = await _fetch_wb_auth_status(telegram_id)
     if authorized is None:
         text = "Не удалось получить статус авторизации WB. Попробуй позже."
     else:
