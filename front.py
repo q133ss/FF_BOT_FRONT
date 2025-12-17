@@ -5244,6 +5244,125 @@ async def on_slot_week(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.message.edit_reply_markup(reply_markup=kb)
 
 
+def _extract_found_slots(result: dict | None) -> list:
+    """
+    Возвращает список слотов из ответа /slots/search, стараясь поддержать разные ключи.
+    """
+    if not isinstance(result, dict):
+        return []
+
+    candidates = [
+        "slots",
+        "found_slots",
+        "initial_slots",
+        "available_slots",
+        "slots_preview",
+        "items",
+    ]
+    for key in candidates:
+        slots = result.get(key)
+        if isinstance(slots, list):
+            return slots
+    return []
+
+
+def _format_slot_line(slot: dict | str) -> str:
+    """
+    Преобразует данные слота в человекочитаемую строку без обрезания.
+    """
+    if isinstance(slot, str):
+        return slot
+    if not isinstance(slot, dict):
+        return str(slot)
+
+    if isinstance(slot.get("text"), str):
+        return slot["text"]
+
+    date_str = (
+        slot.get("date")
+        or slot.get("slot_date")
+        or slot.get("day")
+        or slot.get("date_from")
+        or slot.get("date_to")
+    )
+
+    logistics_text = slot.get("logistics_text") or slot.get("logistics")
+    logistics_percent = slot.get("logistics_percent")
+    logistics_parts = []
+    if logistics_text:
+        logistics_parts.append(str(logistics_text))
+    else:
+        # Попробуем собрать строку из раздельных значений
+        logistics_nums = [
+            slot.get("logistics_in"),
+            slot.get("logistics_out"),
+        ]
+        logistics_nums = [str(v) for v in logistics_nums if v is not None]
+        if logistics_nums:
+            logistics_parts.append(" / ".join(logistics_nums))
+    if logistics_percent is not None:
+        logistics_parts.append(f"{logistics_percent}%")
+
+    acceptance_text = (
+        slot.get("acceptance_text")
+        or slot.get("receiving_text")
+        or slot.get("receiving_price")
+        or slot.get("acceptance_price")
+    )
+
+    parts = []
+    if date_str:
+        parts.append(str(date_str))
+    if logistics_parts:
+        parts.append(f"логистика {' '.join(logistics_parts)}")
+    if acceptance_text is not None:
+        parts.append(f"приемка {acceptance_text}")
+
+    return " • ".join(parts) if parts else str(slot)
+
+
+def _build_slot_search_started_text(
+    payload: dict, slots: list, lead_time_days: int | None, max_logistics: int | None, max_coef: int | None
+) -> str:
+    supply_type_text = {
+        "box": "Короба",
+        "mono": "Монопаллеты",
+        "postal": "Поштучная паллета",
+        "safe": "Суперсейф",
+    }.get(payload.get("supply_type"), str(payload.get("supply_type")))
+
+    period_from = payload.get("search_period_from")
+    period_to = payload.get("search_period_to")
+
+    logistics_limit = "Не ограничивать" if max_logistics is None else f"до {max_logistics}%"
+    coef_line = f"{max_coef}" if max_coef is not None else "-"
+
+    lines = [
+        "Поиск слота запущен ✅",
+        f"Склад: {payload.get('warehouse')}",
+        f"Тип поставки: {supply_type_text}",
+        f"Макс. коэффициент бронирования: {coef_line}",
+        f"Логистика: {logistics_limit}",
+        f"Окно: {period_from} → {period_to}",
+    ]
+
+    if lead_time_days is not None:
+        lines.append(f"Лид-тайм: {lead_time_days} дн.")
+
+    slot_lines = [_format_slot_line(slot) for slot in slots]
+    if slot_lines:
+        lines.extend(
+            [
+                "",
+                f"🎯 Найдено слотов уже сейчас: {len(slot_lines)}",
+                "",
+                *slot_lines,
+            ]
+        )
+
+    return "\n".join(lines)
+
+
 async def on_slot_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await clear_all_ui(callback.message, state)
@@ -5328,6 +5447,18 @@ async def on_slot_confirm(callback: CallbackQuery, state: FSMContext) -> None:
         print("Error calling /slots/search:", e)
         await callback.message.answer("Ошибка создания задачи на поиск слота.")
         return
+
+    # Отправляем пользователю полный список найденных слотов без сокращений
+    slots_found = _extract_found_slots(result)
+    summary_text = _build_slot_search_started_text(
+        payload,
+        slots_found,
+        lead_time_days=lead_time_days,
+        max_logistics=max_logistics_coef_percent,
+        max_coef=max_coef,
+    )
+    if summary_text:
+        await callback.message.answer(summary_text)
 
     # 5) Переход в список задач
     await state.clear()
