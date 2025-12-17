@@ -2138,7 +2138,14 @@ async def _do_main_menu_autobook_list(message: Message, state: FSMContext, teleg
             tasks = resp.json()
     except Exception as e:
         print("Error calling /autobook/list:", e)
-        msg_err = await message.answer("Не удалось получить список задач автобронирования. Попробуй позже.")
+        msg_err = await message.answer(
+            "Не удалось получить список задач автобронирования. Попробуй позже.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")],
+                ]
+            ),
+        )
         await add_ui_message(state, msg_err.message_id)
         return
 
