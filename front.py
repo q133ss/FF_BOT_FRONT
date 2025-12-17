@@ -2126,41 +2126,7 @@ async def handle_main_menu_my_searches(message: Message, state: FSMContext) -> N
 
 
 async def _do_main_menu_autobook_list(message: Message, state: FSMContext, telegram_id: int) -> None:
-    await clear_all_ui(message, state)
-
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(
-                f"{BACKEND_URL}/autobook/list",
-                params={"telegram_id": telegram_id},
-            )
-            resp.raise_for_status()
-            tasks = resp.json()
-    except Exception as e:
-        print("Error calling /autobook/list:", e)
-        msg_err = await message.answer(
-            "Не удалось получить список задач автобронирования. Попробуй позже.",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")],
-                ]
-            ),
-        )
-        await add_ui_message(state, msg_err.message_id)
-        return
-
-    if not tasks:
-        msg = await message.answer(
-            "У тебя пока нет задач автобронирования.\n\n"
-            "Создай их в разделе «📋 Мои задачи», нажав «Автобронирование» под нужной задачей.",
-        )
-        await _add_autobook_message_id(msg, state)
-        await add_ui_message(state, msg.message_id)
-        return
-
-    await state.update_data(autobook_tasks=tasks, autobook_page=0, autobook_message_ids=[])
-
-    await _send_autobook_page(message, state, page=0)
+    await _render_tasks_history(message, state, telegram_id, "auto_booking", page=1)
 
 
 async def handle_main_menu_autobook_list(message: Message, state: FSMContext) -> None:
