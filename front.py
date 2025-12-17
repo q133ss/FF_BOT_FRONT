@@ -3682,6 +3682,8 @@ async def on_autobook_new_confirm(callback: CallbackQuery, state: FSMContext) ->
         await _send_autobook_confirm_error(callback.message, state)
         return
 
+    await clear_all_ui(callback.message, state)
+
     try:
         await callback.message.bot.delete_message(
             chat_id=callback.message.chat.id, message_id=callback.message.message_id
