@@ -38,6 +38,13 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 BACKEND_URL = "http://127.0.0.1:8001"
 
 
+STATUS_RU = {
+    "pending": "В поиске",
+    "found": "Найдено",
+    "cancelled": "Отменено",
+}
+
+
 class WbAuthState(StatesGroup):
     wait_phone = State()
     wait_code = State()
@@ -117,6 +124,12 @@ def get_lead_time_keyboard() -> ReplyKeyboardMarkup:
 
 def get_weekdays_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardRemove()
+
+
+def format_status_ru(status: str | None) -> str:
+    if not status:
+        return "-"
+    return STATUS_RU.get(status, str(status))
 
 def normalize_phone(raw: str) -> str:
     digits = "".join(ch for ch in raw if ch.isdigit())
@@ -1757,9 +1770,30 @@ async def _show_tasks_menu(message: Message, state: FSMContext) -> None:
 
 
 async def _render_tasks_history(
-    message: Message, state: FSMContext, telegram_id: int, req_type: str, page: int = 1
+    message: Message,
+    state: FSMContext,
+    telegram_id: int,
+    req_type: str,
+    page: int = 1,
+    statuses: list[str] | None = None,
 ) -> None:
     await clear_all_ui(message, state)
+
+    state_data = await state.get_data()
+    existing_filters = state_data.get("tasks_history_filters", {})
+    status_filter = statuses
+    if status_filter is None:
+        status_filter = (existing_filters.get(req_type) or {}).get("statuses", [])
+
+    status_filter = [s for s in (status_filter or []) if s]
+
+    if statuses is not None:
+        await state.update_data(
+            tasks_history_filters={
+                **existing_filters,
+                req_type: {"statuses": status_filter or []},
+            }
+        )
 
     user_id = await _get_user_id(telegram_id)
     if not user_id:
@@ -1784,6 +1818,7 @@ async def _render_tasks_history(
                     "req_type": req_type,
                     "page": page,
                     "page_size": HISTORY_PAGE_SIZE,
+                    **({"statuses": ",".join(status_filter)} if status_filter else {}),
                 },
             )
             resp.raise_for_status()
@@ -1825,12 +1860,41 @@ async def _render_tasks_history(
         }
     )
 
+    status_filter_title = "Все"
+    if req_type == "slot_search" and status_filter:
+        status_filter_title = ", ".join(format_status_ru(s) for s in status_filter)
+
     lines = [
         f"📋 {titles.get(req_type, 'Задачи')}".strip(),
         f"Страница {page_num} из {total_pages}",
     ]
 
+    if req_type == "slot_search":
+        lines.append(f"Статус: {status_filter_title}")
+
     kb_rows = []
+    if req_type == "slot_search":
+        filter_buttons = []
+        filter_options = [
+            ("all", "Все", []),
+            ("pending", format_status_ru("pending"), ["pending"]),
+            ("found", format_status_ru("found"), ["found"]),
+            ("cancelled", format_status_ru("cancelled"), ["cancelled"]),
+        ]
+
+        for code, label, values in filter_options:
+            is_active = (not status_filter and code == "all") or status_filter == values
+            text = f"{'✅ ' if is_active else ''}{label}"
+            filter_buttons.append(
+                InlineKeyboardButton(
+                    text=text,
+                    callback_data=f"tasks_history_slot_search_filter:{code}",
+                )
+            )
+
+        kb_rows.append(filter_buttons[:2])
+        kb_rows.append(filter_buttons[2:])
+
     if items:
         if req_type == "slot_search":
             for item in items:
@@ -1838,8 +1902,9 @@ async def _render_tasks_history(
                 warehouse = item.get("warehouse") or "-"
                 supply_type = item.get("supply_type") or "-"
                 status = item.get("status") or "-"
+                status_ru = format_status_ru(status)
                 found = item.get("found", 0)
-                button_text = f"#{item_id} • {warehouse}, {supply_type} — {status}, найдено: {found}"
+                button_text = f"#{item_id} • {warehouse}, {supply_type} — {status_ru}, найдено: {found}"
                 kb_rows.append(
                     [
                         InlineKeyboardButton(
@@ -1921,6 +1986,7 @@ async def _render_slot_history_detail(
     warehouse = item.get("warehouse") or "-"
     supply_type = item.get("supply_type") or "-"
     status = item.get("status") or "-"
+    status_ru = format_status_ru(status)
     found = item.get("found", 0)
     period = item.get("period") or {}
     period_from = period.get("from") or "-"
@@ -1947,7 +2013,7 @@ async def _render_slot_history_detail(
         f"🔎 Задача поиска #{request_id}",
         f"Склад: {warehouse}",
         f"Тип поставки: {supply_type_text}",
-        f"Статус: {status}",
+        f"Статус: {status_ru}",
         f"Найдено слотов: {found}",
         f"Период: {period_from} → {period_to}",
     ]
@@ -2225,6 +2291,36 @@ async def tasks_history_page_callback(callback: CallbackQuery, state: FSMContext
         await callback.answer()
     else:
         await callback.answer("Неизвестный тип задач.", show_alert=True)
+
+
+async def tasks_history_slot_search_filter_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    data_cb = callback.data or ""
+    try:
+        _, raw_filter = data_cb.split(":", 1)
+    except Exception:
+        await callback.answer("Некорректный фильтр.", show_alert=True)
+        return
+
+    mapping = {
+        "all": [],
+        "pending": ["pending"],
+        "found": ["found"],
+        "cancelled": ["cancelled"],
+    }
+
+    if raw_filter not in mapping:
+        await callback.answer("Неизвестный фильтр.", show_alert=True)
+        return
+
+    await callback.answer()
+    await _render_tasks_history(
+        callback.message,
+        state,
+        callback.from_user.id,
+        "slot_search",
+        page=1,
+        statuses=mapping[raw_filter],
+    )
 
 
 async def tasks_history_slot_search_open_callback(
@@ -5673,6 +5769,10 @@ async def main() -> None:
     dp.callback_query.register(menu_tasks_callback, F.data == "menu_tasks")
     dp.callback_query.register(tasks_history_search_callback, F.data == "tasks_history_search")
     dp.callback_query.register(tasks_history_autobook_callback, F.data == "tasks_history_autobook")
+    dp.callback_query.register(
+        tasks_history_slot_search_filter_callback,
+        F.data.startswith("tasks_history_slot_search_filter:"),
+    )
     dp.callback_query.register(
         tasks_history_slot_search_open_callback,
         F.data.startswith("tasks_history_slot_search_open:"),
