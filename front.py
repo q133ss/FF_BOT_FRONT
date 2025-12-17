@@ -2944,23 +2944,22 @@ async def on_autobook_period_manual_input(message: Message, state: FSMContext) -
 
 
 async def _autobook_show_lead_time_step(message: Message, state: FSMContext) -> None:
-    fmt = lambda days: (date.today() + timedelta(days=days)).strftime("%d.%m")
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=f"1 день ({fmt(1)})", callback_data="autobook_lead:1"
+                    text="1 день", callback_data="autobook_lead:1"
                 ),
                 InlineKeyboardButton(
-                    text=f"2 дня ({fmt(2)})", callback_data="autobook_lead:2"
+                    text="2 дня", callback_data="autobook_lead:2"
                 ),
             ],
             [
                 InlineKeyboardButton(
-                    text=f"3 дня ({fmt(3)})", callback_data="autobook_lead:3"
+                    text="3 дня", callback_data="autobook_lead:3"
                 ),
                 InlineKeyboardButton(
-                    text=f"5 дней ({fmt(5)})", callback_data="autobook_lead:5"
+                    text="5 дней", callback_data="autobook_lead:5"
                 ),
             ],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="autobook_back:period")],
@@ -4998,45 +4997,28 @@ async def on_slot_logistics(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(SlotSearchState.period_days)
 
 
-def _get_lead_base_date(data: dict) -> date:
-    search_period_to = data.get("search_period_to")
-    if search_period_to:
-        try:
-            return datetime.fromisoformat(search_period_to).date()
-        except ValueError:
-            pass
-
-    period_days = data.get("period_days") or 0
-    return date.today() + timedelta(days=period_days)
-
-
 async def _show_lead_time_step(message: Message, state: FSMContext) -> None:
     await clear_all_ui(message, state)
-    data = await state.get_data()
-    base_date = _get_lead_base_date(data)
-
-    def fmt(offset: int) -> str:
-        return (base_date + timedelta(days=offset)).strftime("%d.%m")
 
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=f"1 день ({fmt(1)})",
+                    text="1 день",
                     callback_data="slot_lead:1"
                 ),
                 InlineKeyboardButton(
-                    text=f"2 дня ({fmt(2)})",
+                    text="2 дня",
                     callback_data="slot_lead:2"
                 ),
             ],
             [
                 InlineKeyboardButton(
-                    text=f"3 дня ({fmt(3)})",
+                    text="3 дня",
                     callback_data="slot_lead:3"
                 ),
                 InlineKeyboardButton(
-                    text=f"5 дней ({fmt(5)})",
+                    text="5 дней",
                     callback_data="slot_lead:5"
                 ),
             ],
