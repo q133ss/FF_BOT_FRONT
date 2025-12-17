@@ -292,7 +292,11 @@ def _format_slot_line(slot_item) -> str:
 
 
 def _extract_slot_lines(search_response: dict | None) -> list[str]:
-    """Достаёт список строк слотов из ответа /slots/search."""
+    """Достаёт список строк слотов из ответа /slots/search.
+
+    Объединяет все списки, которые может вернуть backend, и отбрасывает
+    служебные строки вида «… и ещё N».
+    """
 
     if not isinstance(search_response, dict):
         return []
@@ -303,15 +307,41 @@ def _extract_slot_lines(search_response: dict | None) -> list[str]:
         search_response.get("slots_found"),
         search_response.get("slots_now"),
         search_response.get("slots_list"),
+        search_response.get("slots_full"),
+        search_response.get("all_slots"),
     )
 
-    slot_items: list = next((c for c in candidates if isinstance(c, list)), [])
+    extra_blocks = search_response.get("slots_info")
+    if isinstance(extra_blocks, dict):
+        candidates += (
+            extra_blocks.get("slots"),
+            extra_blocks.get("available_slots"),
+            extra_blocks.get("list"),
+            extra_blocks.get("items"),
+        )
+
+    slot_items: list = []
+    for c in candidates:
+        if isinstance(c, list):
+            slot_items.extend(c)
 
     lines: list[str] = []
+    seen: set[str] = set()
+
+    ellipsis_re = re.compile(r"…\s*и\s*ещ[её]\s*\d+", re.IGNORECASE)
+
     for slot_item in slot_items:
         line = _format_slot_line(slot_item)
-        if line:
+        if not line:
+            continue
+
+        # backend иногда добавляет строку "… и ещё N" — её пропускаем
+        if ellipsis_re.search(line):
+            continue
+
+        if line not in seen:
             lines.append(line)
+            seen.add(line)
 
     return lines
 
