@@ -233,6 +233,117 @@ def build_slot_summary(data: dict) -> str:
     return "\n".join(summary_lines)
 
 
+def _format_slot_line(slot_item) -> str:
+    """Возвращает человекочитаемую строку со слотами.
+
+    Поддерживает строки (возвращает как есть) и словари, где пытается собрать
+    дату, логистику и приёмку. При отсутствии понятных полей — делает dump
+    словаря, чтобы не потерять данные.
+    """
+
+    if isinstance(slot_item, str):
+        return slot_item
+
+    if isinstance(slot_item, dict):
+        date_str = (
+            slot_item.get("date")
+            or slot_item.get("day")
+            or slot_item.get("date_from")
+            or slot_item.get("date_text")
+        )
+
+        logistics_parts = []
+        logistics_text = slot_item.get("logistics_text") or slot_item.get("logistics")
+        logistics_cost = slot_item.get("logistics_cost") or slot_item.get("logistics_price")
+        logistics_percent = (
+            slot_item.get("logistics_percent")
+            or slot_item.get("logistics_coef_percent")
+            or slot_item.get("logistics_coef")
+        )
+
+        if logistics_text:
+            logistics_parts.append(str(logistics_text))
+        else:
+            cost_bits = []
+            if logistics_cost is not None:
+                cost_bits.append(str(logistics_cost))
+            if logistics_percent is not None:
+                cost_bits.append(f"{logistics_percent}%")
+            if cost_bits:
+                logistics_parts.append(" / ".join(cost_bits))
+
+        acceptance = slot_item.get("acceptance") or slot_item.get("acceptance_text")
+        acceptance = acceptance or slot_item.get("acceptance_price")
+
+        parts = []
+        if date_str:
+            parts.append(str(date_str))
+        if logistics_parts:
+            parts.append(f"логистика {' '.join(logistics_parts)}")
+        if acceptance is not None:
+            parts.append(f"приемка {acceptance}")
+
+        if parts:
+            return " • ".join(parts)
+
+        return json.dumps(slot_item, ensure_ascii=False)
+
+    return str(slot_item)
+
+
+def _extract_slot_lines(search_response: dict | None) -> list[str]:
+    """Достаёт список строк слотов из ответа /slots/search."""
+
+    if not isinstance(search_response, dict):
+        return []
+
+    candidates = (
+        search_response.get("slots"),
+        search_response.get("available_slots"),
+        search_response.get("slots_found"),
+        search_response.get("slots_now"),
+        search_response.get("slots_list"),
+    )
+
+    slot_items: list = next((c for c in candidates if isinstance(c, list)), [])
+
+    lines: list[str] = []
+    for slot_item in slot_items:
+        line = _format_slot_line(slot_item)
+        if line:
+            lines.append(line)
+
+    return lines
+
+
+def _chunk_text_lines(lines: list[str], limit: int = 4000) -> list[str]:
+    """Бьёт список строк на сообщения, учитывая лимит Telegram в 4096 символов."""
+
+    if not lines:
+        return []
+
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+
+    for line in lines:
+        normalized = line.rstrip("\n")
+        extra = len(normalized) + (1 if current else 0)
+
+        if current and current_len + extra > limit:
+            chunks.append("\n".join(current))
+            current = [normalized]
+            current_len = len(normalized)
+        else:
+            current.append(normalized)
+            current_len += extra
+
+    if current:
+        chunks.append("\n".join(current))
+
+    return chunks
+
+
 async def _get_user_id(telegram_id: int) -> int | None:
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -5328,6 +5439,34 @@ async def on_slot_confirm(callback: CallbackQuery, state: FSMContext) -> None:
         print("Error calling /slots/search:", e)
         await callback.message.answer("Ошибка создания задачи на поиск слота.")
         return
+
+    # 4.1) Отправляем пользователю полный список слотов (если есть)
+    slot_lines = _extract_slot_lines(result)
+    supply_type_text = supply_type_backend or str(supply_type)
+    logistics_text = (
+        f"до {max_logistics_coef_percent}%" if max_logistics_coef_percent is not None else "Не ограничивать"
+    )
+
+    header_lines = [
+        "Поиск слота запущен ✅",
+        f"Склад: {warehouse}",
+        f"Тип поставки: {supply_type_text}",
+        f"Макс. коэффициент бронирования: {max_coef}",
+        f"Логистика: {logistics_text}",
+        f"Окно: {search_period_from} → {search_period_to}",
+    ]
+
+    if slot_lines:
+        header_lines.extend(["", f"🎯 Найдено слотов уже сейчас: {len(slot_lines)}", ""])
+        messages_to_send = _chunk_text_lines(header_lines + slot_lines)
+    else:
+        messages_to_send = ["\n".join(header_lines)]
+
+    for text in messages_to_send:
+        try:
+            await callback.message.answer(text)
+        except Exception as e:
+            print("Error sending slot list to user:", e)
 
     # 5) Переход в список задач
     await state.clear()
