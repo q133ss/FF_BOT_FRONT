@@ -309,6 +309,7 @@ def _extract_slot_lines(search_response: dict | None) -> list[str]:
         search_response.get("slots_list"),
         search_response.get("slots_full"),
         search_response.get("all_slots"),
+        search_response.get("slots_text"),
     )
 
     extra_blocks = search_response.get("slots_info")
@@ -318,17 +319,23 @@ def _extract_slot_lines(search_response: dict | None) -> list[str]:
             extra_blocks.get("available_slots"),
             extra_blocks.get("list"),
             extra_blocks.get("items"),
+            extra_blocks.get("text"),
         )
 
     slot_items: list = []
     for c in candidates:
         if isinstance(c, list):
             slot_items.extend(c)
+        elif isinstance(c, str):
+            slot_items.extend([line for line in c.splitlines() if line.strip()])
 
     lines: list[str] = []
     seen: set[str] = set()
 
-    ellipsis_re = re.compile(r"…\s*и\s*ещ[её]\s*\d+", re.IGNORECASE)
+    ellipsis_re = re.compile(
+        r"((…|\.{3})\s*и\s*ещ[её]\s*\d+)|(^\s*и\s*ещ[её]\s*\d+)",
+        re.IGNORECASE,
+    )
 
     for slot_item in slot_items:
         line = _format_slot_line(slot_item)
@@ -5486,17 +5493,17 @@ async def on_slot_confirm(callback: CallbackQuery, state: FSMContext) -> None:
         f"Окно: {search_period_from} → {search_period_to}",
     ]
 
-    if slot_lines:
-        header_lines.extend(["", f"🎯 Найдено слотов уже сейчас: {len(slot_lines)}", ""])
-        messages_to_send = _chunk_text_lines(header_lines + slot_lines)
-    else:
-        messages_to_send = ["\n".join(header_lines)]
+    try:
+        await callback.message.answer("\n".join(header_lines + (["", f"🎯 Найдено слотов уже сейчас: {len(slot_lines)}"] if slot_lines else [])))
+    except Exception as e:
+        print("Error sending slot header:", e)
 
-    for text in messages_to_send:
-        try:
-            await callback.message.answer(text)
-        except Exception as e:
-            print("Error sending slot list to user:", e)
+    if slot_lines:
+        for chunk in _chunk_text_lines(slot_lines):
+            try:
+                await callback.message.answer(chunk)
+            except Exception as e:
+                print("Error sending slot list to user:", e)
 
     # 5) Переход в список задач
     await state.clear()
