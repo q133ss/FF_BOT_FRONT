@@ -233,6 +233,137 @@ def build_slot_summary(data: dict) -> str:
     return "\n".join(summary_lines)
 
 
+def _extract_slots(data: dict | None) -> list:
+    if not data:
+        return []
+
+    for key in (
+        "slots",
+        "slots_preview",
+        "slot_items",
+        "found_slots",
+        "available_slots",
+    ):
+        slots = data.get(key)
+        if slots:
+            return slots
+
+    return []
+
+
+def format_slot_lines(slots: list | None) -> list[str]:
+    """
+    Преобразует список слотов в набор человекочитаемых строк без усечения.
+    Поддерживает как готовые строки, так и словари с полями даты/логистики/приёмки.
+    Если структура неизвестна, выводит json-словарь целиком, чтобы не потерять данные.
+    """
+
+    lines: list[str] = []
+    if not slots:
+        return lines
+
+    for slot in slots:
+        if slot is None:
+            continue
+
+        if isinstance(slot, str):
+            lines.append(slot)
+            continue
+
+        if isinstance(slot, dict):
+            text = slot.get("text") or slot.get("title") or slot.get("description")
+            if text:
+                lines.append(str(text))
+                continue
+
+            date = slot.get("date") or slot.get("slot_date") or slot.get("day")
+            parts = [str(date)] if date else []
+
+            logistics_values = []
+            for key in (
+                "logistics",
+                "logistics_text",
+                "logistics_percent",
+                "logistics_coef",
+                "logistics_coefficient",
+            ):
+                value = slot.get(key)
+                if value not in (None, ""):
+                    logistics_values.append(str(value))
+            if logistics_values:
+                parts.append(f"логистика {' / '.join(logistics_values)}")
+
+            acceptance_value = (
+                slot.get("acceptance_text")
+                or slot.get("acceptance")
+                or slot.get("acceptance_price")
+                or slot.get("acceptance_cost")
+            )
+            if acceptance_value not in (None, ""):
+                parts.append(f"приемка {acceptance_value}")
+            elif slot.get("acceptance_free") or slot.get("free_acceptance"):
+                parts.append("приемка Бесплатно")
+
+            if not parts:
+                parts.append(json.dumps(slot, ensure_ascii=False))
+
+            lines.append(" • ".join(parts))
+            continue
+
+        lines.append(str(slot))
+
+    return lines
+
+
+def _build_slot_search_started_text(data: dict, response: dict | None) -> str:
+    warehouse = data.get("warehouse") or "-"
+    supply_type = data.get("supply_type")
+    max_coef = data.get("max_coef")
+    max_logistics_coef_percent = data.get("max_logistics_coef_percent")
+    search_period_from = data.get("search_period_from") or "-"
+    search_period_to = data.get("search_period_to") or "-"
+
+    supply_type_text = {
+        "box": "Короба",
+        "mono": "Монопаллеты",
+        "postal": "Поштучная паллета",
+        "safe": "Суперсейф",
+    }.get(supply_type, str(supply_type))
+
+    logistics_text = (
+        "Не ограничивать" if max_logistics_coef_percent is None else f"до {max_logistics_coef_percent}%"
+    )
+
+    slots_raw = _extract_slots(response)
+    slot_lines = format_slot_lines(slots_raw)
+
+    found_count = None
+    for key in ("found", "slots_found", "found_slots", "slots_count"):
+        value = (response or {}).get(key)
+        if value is not None:
+            found_count = value
+            break
+    if found_count is None:
+        found_count = len(slots_raw)
+
+    lines = [
+        "Поиск слота запущен ✅",
+        f"Склад: {warehouse}",
+        f"Тип поставки: {supply_type_text}",
+        f"Макс. коэффициент бронирования: {max_coef}",
+        f"Логистика: {logistics_text}",
+        f"Окно: {search_period_from} → {search_period_to}",
+        "",
+        f"🎯 Найдено слотов уже сейчас: {found_count}",
+    ]
+
+    if slot_lines:
+        lines.append("")
+        lines.extend(slot_lines)
+
+    return "\n".join(lines)
+
+
 async def _get_user_id(telegram_id: int) -> int | None:
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -1829,6 +1960,24 @@ async def _render_slot_history_detail(
         lines.append(f"Коэффициент приёмки: x{max_coef}")
     if max_logistics is not None:
         lines.append(f"Логистика: до {max_logistics}%")
+
+    detail_payload = None
+    slots_raw = _extract_slots(item)
+    if not slots_raw:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(f"{BACKEND_URL}/slots/search/{request_id}")
+                resp.raise_for_status()
+                detail_payload = resp.json()
+        except Exception as e:
+            print(f"Error calling /slots/search/{request_id}:", e)
+        slots_raw = _extract_slots(detail_payload)
+
+    slot_lines = format_slot_lines(slots_raw)
+    if slot_lines:
+        lines.append("")
+        lines.append("📅 Слоты:")
+        lines.extend(slot_lines)
 
     kb_rows = []
 
@@ -5328,6 +5477,20 @@ async def on_slot_confirm(callback: CallbackQuery, state: FSMContext) -> None:
         print("Error calling /slots/search:", e)
         await callback.message.answer("Ошибка создания задачи на поиск слота.")
         return
+
+    try:
+        text = _build_slot_search_started_text({
+            "warehouse": warehouse,
+            "supply_type": supply_type,
+            "max_coef": max_coef,
+            "max_logistics_coef_percent": max_logistics_coef_percent,
+            "search_period_from": search_period_from,
+            "search_period_to": search_period_to,
+        }, result)
+        msg = await callback.message.answer(text)
+        await add_ui_message(state, msg.message_id)
+    except Exception as e:
+        print("Error rendering slot search started message:", e)
 
     # 5) Переход в список задач
     await state.clear()
