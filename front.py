@@ -3356,6 +3356,9 @@ async def on_autobook_week(callback: CallbackQuery, state: FSMContext) -> None:
         available_warehouses = warehouses_selected
         unavailable = []
 
+        waiting_msg = await callback.message.answer("Проверяем доступность складов... ⏳")
+        await add_ui_message(state, waiting_msg.message_id)
+
         if supply_type_backend and warehouses_selected:
             try:
                 async with httpx.AsyncClient(timeout=10.0) as client:
@@ -3372,6 +3375,8 @@ async def on_autobook_week(callback: CallbackQuery, state: FSMContext) -> None:
                     unavailable = availability_resp.get("unavailable") or []
             except Exception as e:
                 print("Error calling /warehouses/availability:", e)
+
+        await delete_ui_message(callback.message, state, waiting_msg.message_id)
 
         payload = {
             "draft_id": (payload_source.get("autobook_draft") or {}).get("id"),
