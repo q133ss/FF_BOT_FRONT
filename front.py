@@ -3593,6 +3593,21 @@ async def on_autobook_new_request(callback: CallbackQuery, state: FSMContext) ->
     draft_goods = draft.get("good_quantity")
     draft_barcodes = draft.get("barcode_quantity")
 
+    availability = None
+    wh_list_raw = warehouse if isinstance(warehouse, (list, tuple)) else [warehouse]
+    wh_list = [w for w in wh_list_raw if w]
+    if wh_list:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp_availability = await client.post(
+                    f"{BACKEND_URL}/warehouses/availability",
+                    json={"supply_type": supply_type, "warehouses": wh_list},
+                )
+                resp_availability.raise_for_status()
+                availability = resp_availability.json() or {}
+        except Exception as e:
+            print("Error checking warehouses availability (summary):", e)
+
     summary_lines = [
         "🚀 Автобронирование",
         "",
@@ -3606,11 +3621,38 @@ async def on_autobook_new_request(callback: CallbackQuery, state: FSMContext) ->
         f"• Логистика: {logistics_percent}%",
         f"• Лид-тайм: {lead_time} дн.",
         f"• Даты: {period_text}",
-        "",
-        "На следующем этапе я подготовлю поставки для каждого склада в вашем личном кабинете WB к бронированию",
-        "Пожалуйста, не удаляйте их - так я сэкономлю ~0.5 секунды на бронирование при появлении слота",
-        "После успешного бронировании лишние поставки будут удалены",
     ]
+
+    if availability:
+        available_wh = availability.get("available") or []
+        unavailable_wh = availability.get("unavailable") or []
+
+        if unavailable_wh:
+            summary_lines.append("")
+            summary_lines.append("❌ Недоступно для выбранного типа поставки:")
+            for item in unavailable_wh:
+                w_name = item.get("warehouse")
+                reason = item.get("reason")
+                if not w_name:
+                    continue
+                summary_lines.append(
+                    f"• {w_name}{f' — {reason}' if reason else ''}"
+                )
+        if available_wh and set(available_wh) != set(wh_list):
+            summary_lines.append("")
+            summary_lines.append(
+                "Автобронь будет запущена только по доступным складам: "
+                f"{_format_warehouses_label(available_wh)}"
+            )
+
+    summary_lines.extend(
+        [
+            "",
+            "На следующем этапе я подготовлю поставки для каждого склада в вашем личном кабинете WB к бронированию",
+            "Пожалуйста, не удаляйте их - так я сэкономлю ~0.5 секунды на бронирование при появлении слота",
+            "После успешного бронировании лишние поставки будут удалены",
+        ]
+    )
 
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
