@@ -159,13 +159,24 @@ def get_logistics_coef_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
+def _format_warehouses_label(value) -> str:
+    if value is None:
+        return "-"
+
+    if isinstance(value, (list, tuple, set)):
+        names = [str(v) for v in value if v]
+        return ", ".join(names) if names else "-"
+
+    return str(value)
+
+
 def build_slot_summary(data: dict) -> str:
     """
     Собирает человекочитаемую сводку параметров задачи поиска слота.
     Ожидает в data поля: warehouse, supply_type, max_coef, period_days, lead_time_days, weekdays,
     max_logistics_coef_percent, search_period_from, search_period_to.
     """
-    warehouse = data.get("warehouse")
+    warehouse = data.get("warehouses") or data.get("warehouse")
     supply_type = data.get("supply_type")
     max_coef = data.get("max_coef")
     period_days = data.get("period_days")
@@ -233,7 +244,7 @@ def build_slot_summary(data: dict) -> str:
     summary_lines = [
         "Проверь параметры задачи:",
         "",
-        f"• Склад: {warehouse}",
+        f"• Склад: {_format_warehouses_label(warehouse)}",
         f"• Тип поставки: {supply_type_text}",
         f"• Макс. коэффициент: x{max_coef}",
         f"• Логистический коэффициент: {logistics_text}",
@@ -329,7 +340,7 @@ def format_slot_lines(slots: list | None) -> list[str]:
 
 
 def _build_slot_search_started_text(data: dict, response: dict | None) -> str:
-    warehouse = data.get("warehouse") or "-"
+    warehouse = data.get("warehouses") or data.get("warehouse") or "-"
     supply_type = data.get("supply_type")
     max_coef = data.get("max_coef")
     max_logistics_coef_percent = data.get("max_logistics_coef_percent")
@@ -361,7 +372,7 @@ def _build_slot_search_started_text(data: dict, response: dict | None) -> str:
 
     lines = [
         "Поиск слота запущен ✅",
-        f"Склад: {warehouse}",
+        f"Склад: {_format_warehouses_label(warehouse)}",
         f"Тип поставки: {supply_type_text}",
         f"Макс. коэффициент бронирования: {max_coef}",
         f"Логистика: {logistics_text}",
@@ -1078,7 +1089,7 @@ async def _render_autobook_card(message: Message, state: FSMContext, autobook_id
         await _add_autobook_message_id(msg, state)
         return
 
-    warehouse = task.get("warehouse")
+    warehouse = task.get("warehouses") or task.get("warehouse")
     supply_type = task.get("supply_type")
     max_coef = task.get("max_coef")
     status = task.get("status")
@@ -1101,7 +1112,7 @@ async def _render_autobook_card(message: Message, state: FSMContext, autobook_id
     text = (
         f"{status_emoji} Автобронирование #{autobook_id}\n\n"
         f"По задаче поиска #{slot_task_id}\n"
-        f"Склад: {warehouse}\n"
+        f"Склад: {_format_warehouses_label(warehouse)}\n"
         f"Тип поставки: {supply_type_text}\n"
         f"Макс. коэффициент: x{max_coef}\n"
         f"Статус: {status}"
@@ -2723,13 +2734,17 @@ async def _autobook_render_warehouse_page(message_obj: Message, state: FSMContex
     items = data.get("autobook_wh_items") or []
     page = data.get("autobook_wh_page", 0)
     pages = data.get("autobook_wh_pages", 1)
+    selected_ids = set(data.get("autobook_selected_warehouses") or [])
 
     rows = []
     for w in items:
+        wh_id = w.get("id")
+        wh_name = w.get("name")
+        prefix = "✅ " if wh_id in selected_ids else "☐ "
         rows.append([
             InlineKeyboardButton(
-                text=w.get("name"),
-                callback_data=f"autobook_wh_id:{w.get('id')}",
+                text=f"{prefix}{wh_name}",
+                callback_data=f"autobook_wh_id:{wh_id}",
             )
         ])
 
@@ -2740,6 +2755,9 @@ async def _autobook_render_warehouse_page(message_obj: Message, state: FSMContex
         nav.append(InlineKeyboardButton(text="▶️", callback_data=f"autobook_wh_page:{page+1}"))
     if nav:
         rows.append(nav)
+
+    if selected_ids:
+        rows.append([InlineKeyboardButton(text="➡️ Далее", callback_data="autobook_wh_done")])
 
     rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")])
 
@@ -2769,6 +2787,8 @@ async def _autobook_load_warehouses(message_obj: Message, state: FSMContext) -> 
         autobook_wh_page=data.get("page"),
         autobook_wh_pages=data.get("pages"),
         autobook_wh_map={w.get("id"): w.get("name") for w in data.get("items", [])},
+        autobook_selected_warehouses=set(),
+        warehouses=[],
     )
 
     await _autobook_render_warehouse_page(message_obj, state)
@@ -2847,8 +2867,6 @@ async def on_autobook_warehouse(callback: CallbackQuery, state: FSMContext) -> N
         return
 
     await callback.answer()
-    await clear_all_ui(callback.message, state)
-
     try:
         _, wh_id_str = callback.data.split(":", 1)
         wh_id = int(wh_id_str)
@@ -2864,8 +2882,19 @@ async def on_autobook_warehouse(callback: CallbackQuery, state: FSMContext) -> N
         await callback.message.answer("Ошибка: склад не найден. Попробуй снова.")
         return
 
-    await state.update_data(warehouse=warehouse_name)
+    selected = set(data.get("autobook_selected_warehouses") or [])
+    if wh_id in selected:
+        selected.remove(wh_id)
+    else:
+        selected.add(wh_id)
 
+    await state.update_data(autobook_selected_warehouses=selected)
+
+    await clear_all_ui(callback.message, state)
+    await _autobook_render_warehouse_page(callback.message, state)
+
+
+async def _autobook_show_supply_step(message_obj: Message, state: FSMContext) -> None:
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -2880,13 +2909,35 @@ async def on_autobook_warehouse(callback: CallbackQuery, state: FSMContext) -> N
         ]
     )
 
-    msg = await callback.message.answer(
+    msg = await message_obj.answer(
         "Шаг 2 из 7 — тип поставки.\n\nВыбери один из вариантов:",
         reply_markup=kb,
     )
 
     await add_ui_message(state, msg.message_id)
     await state.set_state(AutoBookNewState.supply_type)
+
+
+async def on_autobook_wh_done(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+
+    data = await state.get_data()
+    selected_ids = set(data.get("autobook_selected_warehouses") or [])
+    name_map = data.get("autobook_wh_map", {})
+    selected_names = sorted(name_map.get(wid) for wid in selected_ids if name_map.get(wid))
+
+    if not selected_names:
+        await callback.message.answer("Выбери хотя бы один склад.")
+        await _autobook_render_warehouse_page(callback.message, state)
+        return
+
+    await clear_all_ui(callback.message, state)
+
+    await state.update_data(
+        warehouses=selected_names,
+    )
+
+    await _autobook_show_supply_step(callback.message, state)
 
 
 async def on_autobook_back(callback: CallbackQuery, state: FSMContext) -> None:
@@ -2900,25 +2951,7 @@ async def on_autobook_back(callback: CallbackQuery, state: FSMContext) -> None:
 
     if target == "supply":
         await clear_all_ui(callback.message, state)
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="📦 Короба", callback_data="autobook_supply:box"),
-                    InlineKeyboardButton(text="🟫 Монопаллеты", callback_data="autobook_supply:mono"),
-                ],
-                [
-                    InlineKeyboardButton(text="✉️ Поштучная паллета", callback_data="autobook_supply:postal"),
-                    InlineKeyboardButton(text="🛡 Суперсейф", callback_data="autobook_supply:safe"),
-                ],
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="autobook_back:warehouse")],
-            ]
-        )
-        msg = await callback.message.answer(
-            "Шаг 2 из 7 — тип поставки.\n\nВыбери один из вариантов:",
-            reply_markup=kb,
-        )
-        await add_ui_message(state, msg.message_id)
-        await state.set_state(AutoBookNewState.supply_type)
+        await _autobook_show_supply_step(callback.message, state)
         return
 
     if target == "coef":
@@ -3299,7 +3332,7 @@ async def on_autobook_week(callback: CallbackQuery, state: FSMContext) -> None:
             "supply_type": supply_type_backend,
             "telegram_chat_id": callback.from_user.id,
             "user_id": payload_source.get("autobook_user_id") or (payload_source.get("autobook_account") or {}).get("user_id"),
-            "warehouse": payload_source.get("warehouse"),
+            "warehouses": payload_source.get("warehouses") or payload_source.get("warehouse"),
             "weekdays": weekdays,
         }
 
@@ -3538,7 +3571,7 @@ async def on_autobook_new_request(callback: CallbackQuery, state: FSMContext) ->
         await callback.answer("Поиск не найден.", show_alert=True)
         return
 
-    warehouse = selected.get("warehouse")
+    warehouse = selected.get("warehouses") or selected.get("warehouse")
     supply_type = selected.get("supply_type")
     max_coef = selected.get("max_booking_coefficient")
     logistics_percent = selected.get("max_logistics_percent")
@@ -3567,7 +3600,7 @@ async def on_autobook_new_request(callback: CallbackQuery, state: FSMContext) ->
         f"Черновик #{draft_id} — от {draft_created}, товаров: {draft_goods}, баркодов: {draft_barcodes}",
         "",
         "Поиск:",
-        f"• Склад: {warehouse}",
+        f"• Склад: {_format_warehouses_label(warehouse)}",
         f"• Тип поставки: {supply_text}",
         f"• Коэффициент: {max_coef}",
         f"• Логистика: {logistics_percent}%",
@@ -3640,13 +3673,17 @@ async def on_autobook_new_confirm(callback: CallbackQuery, state: FSMContext) ->
         "supply_type",
         "telegram_chat_id",
         "user_id",
-        "warehouse",
+        "warehouses",
         "weekdays",
     ]
 
-    if not payload or any(payload.get(f) in (None, "") for f in required_fields):
+    if not payload or any(payload.get(f) in (None, "", []) for f in required_fields):
         await _send_autobook_confirm_error(callback.message, state)
         return
+
+    warehouses = payload.get("warehouses")
+    if isinstance(warehouses, str):
+        payload["warehouses"] = [warehouses]
 
     await clear_all_ui(callback.message, state)
 
@@ -4234,7 +4271,7 @@ async def on_autobook_from_search(callback: CallbackQuery, state: FSMContext) ->
         await state.clear()
         return
 
-    warehouse = slot_task.get("warehouse")
+    warehouse = slot_task.get("warehouses") or slot_task.get("warehouse")
     supply_type = slot_task.get("supply_type")
     max_coef = slot_task.get("max_coef")
     lead_time_days = slot_task.get("lead_time_days")
@@ -4257,7 +4294,7 @@ async def on_autobook_from_search(callback: CallbackQuery, state: FSMContext) ->
 
     text = (
         "🚀 Автобронирование\n\n"
-        f"Склад: {warehouse}\n"
+        f"Склад: {_format_warehouses_label(warehouse)}\n"
         f"Тип поставки: {supply_type_text}\n"
         f"Коэффициент: ≤x{max_coef}\n"
         f"Лид-тайм (мин. кол-во дней до слота): {lead_time_days}\n"
@@ -5695,6 +5732,7 @@ async def main() -> None:
     dp.callback_query.register(on_autobook_task_chosen, F.data.startswith("autobook_task:"))
     dp.callback_query.register(on_autobook_wh_page, F.data.startswith("autobook_wh_page:"))
     dp.callback_query.register(on_autobook_warehouse, F.data.startswith("autobook_wh_id:"))
+    dp.callback_query.register(on_autobook_wh_done, F.data == "autobook_wh_done")
     dp.callback_query.register(on_autobook_supply, F.data.startswith("autobook_supply:"))
     dp.callback_query.register(on_autobook_coef, F.data.startswith("autobook_coef:"))
     dp.callback_query.register(on_autobook_logistics, F.data.startswith("autobook_log:"))
