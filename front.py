@@ -170,7 +170,7 @@ def _format_warehouses_label(value) -> str:
     return str(value)
 
 
-def build_slot_summary(data: dict) -> str:
+def build_slot_summary(data: dict, *, action_line: str | None = None) -> str:
     """
     Собирает человекочитаемую сводку параметров задачи поиска слота.
     Ожидает в data поля: warehouse, supply_type, max_coef, period_days, lead_time_days, weekdays,
@@ -251,9 +251,12 @@ def build_slot_summary(data: dict) -> str:
         f"• Период поиска: {period_text}",
         f"• Лид-тайм: {lead_time_days} дн.",
         f"• Дни недели: {weekdays_text}",
-        "",
-        "Создать задачу на поиск слота с такими параметрами?",
     ]
+
+    if action_line is None:
+        action_line = "Создать задачу на поиск слота с такими параметрами?"
+
+    summary_lines.extend(["", action_line])
     return "\n".join(summary_lines)
 
 
@@ -3273,7 +3276,9 @@ def build_autobook_manual_summary(data: dict) -> str:
     unavailable_items = availability_info.get("unavailable") or []
     available_items = availability_info.get("available")
 
-    slot_summary = build_slot_summary(data)
+    slot_summary = build_slot_summary(
+        data, action_line="Создать задачу на автобронь с такими параметрами?"
+    )
 
     lines = [
         "🚀 Автобронирование",
@@ -3310,6 +3315,14 @@ def build_autobook_manual_summary(data: dict) -> str:
                     f"Автобронь запустим только по доступным складам: {_format_warehouses_label(available_items)}",
                 ]
             )
+    elif available_items:
+        lines.extend(
+            [
+                "",
+                "Все выбранные склады доступны для выбранного типа поставки.",
+                f"Автобронь запустим по складам: {_format_warehouses_label(available_items)}",
+            ]
+        )
 
     return "\n".join(lines)
 
