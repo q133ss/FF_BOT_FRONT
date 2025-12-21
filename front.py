@@ -3681,9 +3681,63 @@ async def on_autobook_new_confirm(callback: CallbackQuery, state: FSMContext) ->
         await _send_autobook_confirm_error(callback.message, state)
         return
 
-    warehouses = payload.get("warehouses")
+    warehouses = payload.get("warehouses") or []
     if isinstance(warehouses, str):
-        payload["warehouses"] = [warehouses]
+        warehouses = [warehouses]
+
+    availability = None
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp_availability = await client.post(
+                f"{BACKEND_URL}/warehouses/availability",
+                json={"supply_type": payload.get("supply_type"), "warehouses": warehouses},
+            )
+            resp_availability.raise_for_status()
+            availability = resp_availability.json() or {}
+    except Exception as e:
+        print("Error checking warehouses availability:", e)
+        await _send_autobook_confirm_error(callback.message, state)
+        return
+
+    available_wh = availability.get("available") or []
+    unavailable_wh = availability.get("unavailable") or []
+
+    if not available_wh:
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад к складам", callback_data="autobook_back:warehouse")],
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")],
+            ]
+        )
+        msg = await callback.message.answer(
+            "Ни один из выбранных складов сейчас не принимает этот тип поставки."
+            " Выберите другие склады.",
+            reply_markup=kb,
+        )
+        await add_ui_message(state, msg.message_id)
+        await state.set_state(AutoBookNewState.confirm)
+        return
+
+    if set(available_wh) != set(warehouses):
+        info_lines = [
+            "⚠️ Некоторые склады недоступны для выбранного типа поставки:",
+        ]
+        for item in unavailable_wh:
+            w_name = item.get("warehouse")
+            reason = item.get("reason")
+            if w_name:
+                info_lines.append(f"• {w_name}: {reason or 'Недоступен'}")
+        info_lines.append(
+            "Автобронь будет запущена только по доступным складам: "
+            f"{_format_warehouses_label(available_wh)}."
+        )
+        info_lines.append("Продолжаю оформление автоброни по доступным складам.")
+
+        info_msg = await callback.message.answer("\n".join(info_lines))
+        await add_ui_message(state, info_msg.message_id)
+
+    payload["warehouses"] = available_wh
+    await state.update_data(autobook_new_payload=payload)
 
     await clear_all_ui(callback.message, state)
 
