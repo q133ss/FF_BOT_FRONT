@@ -170,7 +170,7 @@ def _format_warehouses_label(value) -> str:
     return str(value)
 
 
-def build_slot_summary(data: dict) -> str:
+def build_slot_summary(data: dict, *, action_line: str | None = None) -> str:
     """
     Собирает человекочитаемую сводку параметров задачи поиска слота.
     Ожидает в data поля: warehouse, supply_type, max_coef, period_days, lead_time_days, weekdays,
@@ -251,9 +251,12 @@ def build_slot_summary(data: dict) -> str:
         f"• Период поиска: {period_text}",
         f"• Лид-тайм: {lead_time_days} дн.",
         f"• Дни недели: {weekdays_text}",
-        "",
-        "Создать задачу на поиск слота с такими параметрами?",
     ]
+
+    if action_line is None:
+        action_line = "Создать задачу на поиск слота с такими параметрами?"
+
+    summary_lines.extend(["", action_line])
     return "\n".join(summary_lines)
 
 
@@ -3269,8 +3272,13 @@ def build_autobook_manual_summary(data: dict) -> str:
     draft_created = draft.get("created_at")
     draft_goods = draft.get("good_quantity")
     draft_barcodes = draft.get("barcode_quantity")
+    availability_info = data.get("autobook_availability") or {}
+    unavailable_items = availability_info.get("unavailable") or []
+    available_items = availability_info.get("available")
 
-    slot_summary = build_slot_summary(data)
+    slot_summary = build_slot_summary(
+        data, action_line="Создать задачу на автобронь с такими параметрами?"
+    )
 
     lines = [
         "🚀 Автобронирование",
@@ -3284,6 +3292,37 @@ def build_autobook_manual_summary(data: dict) -> str:
         "Пожалуйста, не удаляйте их - так я сэкономлю ~0.5 секунды на бронирование при появлении слота",
         "После успешного бронировании лишние поставки будут удалены",
     ]
+
+    if unavailable_items:
+        lines.extend([
+            "",
+            "⚠️ Некоторые склады недоступны для выбранного типа поставки:",
+        ])
+
+        for item in unavailable_items:
+            if isinstance(item, dict):
+                warehouse = item.get("warehouse") or item.get("name") or "—"
+                reason = item.get("reason")
+                extra = f" — {reason}" if reason else ""
+                lines.append(f"❌ {warehouse}{extra}")
+            else:
+                lines.append(f"❌ {item}")
+
+        if available_items:
+            lines.extend(
+                [
+                    "",
+                    f"Автобронь запустим только по доступным складам: {_format_warehouses_label(available_items)}",
+                ]
+            )
+    elif available_items:
+        lines.extend(
+            [
+                "",
+                "Все выбранные склады доступны для выбранного типа поставки.",
+                f"Автобронь запустим по складам: {_format_warehouses_label(available_items)}",
+            ]
+        )
 
     return "\n".join(lines)
 
@@ -3323,6 +3362,35 @@ async def on_autobook_week(callback: CallbackQuery, state: FSMContext) -> None:
             "safe": "Суперсейф",
         }.get(payload_source.get("supply_type")) or payload_source.get("supply_type")
 
+        warehouses_selected = payload_source.get("warehouses") or payload_source.get("warehouse") or []
+        if isinstance(warehouses_selected, str):
+            warehouses_selected = [warehouses_selected]
+
+        available_warehouses = warehouses_selected
+        unavailable = []
+
+        waiting_msg = await callback.message.answer("Проверяем доступность складов... ⏳")
+        await add_ui_message(state, waiting_msg.message_id)
+
+        if supply_type_backend and warehouses_selected:
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.post(
+                        f"{BACKEND_URL}/warehouses/availability",
+                        json={
+                            "supply_type": supply_type_backend,
+                            "warehouses": warehouses_selected,
+                        },
+                    )
+                    resp.raise_for_status()
+                    availability_resp = resp.json() or {}
+                    available_warehouses = availability_resp.get("available") or warehouses_selected
+                    unavailable = availability_resp.get("unavailable") or []
+            except Exception as e:
+                print("Error calling /warehouses/availability:", e)
+
+        await delete_ui_message(callback.message, state, waiting_msg.message_id)
+
         payload = {
             "draft_id": (payload_source.get("autobook_draft") or {}).get("id"),
             "lead_time_days": payload_source.get("lead_time_days"),
@@ -3332,11 +3400,17 @@ async def on_autobook_week(callback: CallbackQuery, state: FSMContext) -> None:
             "supply_type": supply_type_backend,
             "telegram_chat_id": callback.from_user.id,
             "user_id": payload_source.get("autobook_user_id") or (payload_source.get("autobook_account") or {}).get("user_id"),
-            "warehouses": payload_source.get("warehouses") or payload_source.get("warehouse"),
+            "warehouses": available_warehouses,
             "weekdays": weekdays,
         }
 
-        await state.update_data(autobook_new_payload=payload)
+        await state.update_data(
+            autobook_new_payload=payload,
+            autobook_availability={
+                "available": available_warehouses,
+                "unavailable": unavailable,
+            },
+        )
 
         summary = build_autobook_manual_summary(await state.get_data())
         kb = InlineKeyboardMarkup(
