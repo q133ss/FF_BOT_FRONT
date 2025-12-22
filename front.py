@@ -2518,6 +2518,11 @@ async def autobook_create_from_history_callback(
 
     items = history_resp.get("items") or []
 
+    await state.update_data(
+        autobook_history_items=items,
+        autobook_user_id=user_id,
+    )
+
     if not items:
         await wait_msg.edit_text(
             "Нет недавних задач поиска слотов. Можно создать автобронь с нуля.",
@@ -4437,29 +4442,60 @@ async def on_autobook_from_search(callback: CallbackQuery, state: FSMContext) ->
     await clear_all_ui(callback.message, state)
     await state.update_data(autobook_message_ids=[], slot_search_task_id=slot_search_task_id)
 
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
-                f"{BACKEND_URL}/autobook/options",
-                json={"telegram_id": telegram_id, "slot_search_task_id": slot_search_task_id},
-            )
-            resp.raise_for_status()
-            options = resp.json()
-    except Exception as e:
-        print("Error calling /autobook/options:", e)
-        await callback.answer("Не удалось получить данные для автобронирования.", show_alert=True)
+    data_state = await state.get_data()
+    history_items = data_state.get("autobook_history_items") or []
+    slot_task_raw = next((i for i in history_items if i.get("id") == slot_search_task_id), None)
+
+    if slot_task_raw is None:
+        await callback.answer("Не удалось найти данные задачи.", show_alert=True)
         return
 
-    slot_task = options.get("slot_task") or {}
-    accounts = options.get("accounts") or []
-    drafts = options.get("drafts") or []
-    transit_warehouses = options.get("transit_warehouses") or []
+    period = slot_task_raw.get("period") or {}
+    slot_task = {
+        "warehouse": slot_task_raw.get("warehouse"),
+        "warehouses": slot_task_raw.get("warehouse"),
+        "supply_type": slot_task_raw.get("supply_type"),
+        "max_coef": slot_task_raw.get("max_booking_coefficient"),
+        "max_logistics_coef_percent": slot_task_raw.get("max_logistics_percent"),
+        "lead_time_days": slot_task_raw.get("lead_time_days"),
+        "date_from": period.get("from"),
+        "date_to": period.get("to"),
+        "weekdays": slot_task_raw.get("weekdays"),
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp_user = await client.get(
+                f"{BACKEND_URL}/users/get-id",
+                params={"telegram_id": telegram_id},
+            )
+            resp_user.raise_for_status()
+            user_id = resp_user.json().get("user_id")
+            if user_id is None:
+                raise ValueError("user_id is missing in /users/get-id response")
+
+            resp_accounts = await client.get(
+                f"{BACKEND_URL}/wb/accounts",
+                params={
+                    "user_id": user_id,
+                    "page": 1,
+                    "per_page": AUTBOOK_ACCOUNTS_PAGE_SIZE,
+                },
+            )
+            resp_accounts.raise_for_status()
+            accounts_resp = resp_accounts.json() or {}
+            accounts = accounts_resp.get("items") or accounts_resp.get("accounts") or []
+    except Exception as e:
+        print("Error loading accounts for autobook from history:", e)
+        await callback.answer("Не удалось загрузить аккаунты.", show_alert=True)
+        return
 
     await state.update_data(
         slot_task=slot_task,
         accounts=accounts,
-        drafts=drafts,
-        transit_warehouses=transit_warehouses,
+        drafts=[],
+        transit_warehouses=[],
+        autobook_user_id=user_id,
     )
 
     if not accounts:
@@ -4474,6 +4510,7 @@ async def on_autobook_from_search(callback: CallbackQuery, state: FSMContext) ->
     warehouse = slot_task.get("warehouses") or slot_task.get("warehouse")
     supply_type = slot_task.get("supply_type")
     max_coef = slot_task.get("max_coef")
+    max_logistics_coef_percent = slot_task.get("max_logistics_coef_percent")
     lead_time_days = slot_task.get("lead_time_days")
     date_from = slot_task.get("date_from")
     date_to = slot_task.get("date_to")
@@ -4497,6 +4534,11 @@ async def on_autobook_from_search(callback: CallbackQuery, state: FSMContext) ->
         f"Склад: {_format_warehouses_label(warehouse)}\n"
         f"Тип поставки: {supply_type_text}\n"
         f"Коэффициент: ≤x{max_coef}\n"
+        (
+            f"Логистика: до {max_logistics_coef_percent}%\n"
+            if max_logistics_coef_percent is not None
+            else "Логистика: не ограничена\n"
+        )
         f"Лид-тайм (мин. кол-во дней до слота): {lead_time_days}\n"
         f"Поиск слота на даты: {date_from}–{date_to}\n"
         f"Дни недели: {weekdays_text}\n\n"
@@ -5161,9 +5203,49 @@ async def on_autobook_choose_account(callback: CallbackQuery, state: FSMContext)
     await state.update_data(account_id=account_id)
     data = await state.get_data()
     transit_warehouses = data.get("transit_warehouses") or []
+    drafts = data.get("drafts") or []
+    user_id = data.get("autobook_user_id")
+
+    if not drafts:
+        if user_id is None:
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp_user = await client.get(
+                        f"{BACKEND_URL}/users/get-id",
+                        params={"telegram_id": callback.from_user.id},
+                    )
+                    resp_user.raise_for_status()
+                    user_id = resp_user.json().get("user_id")
+            except Exception as e:
+                print("Error resolving user for autobook drafts:", e)
+                await callback.message.answer(
+                    "Не удалось получить данные пользователя. Попробуйте позже.",
+                    reply_markup=get_main_menu_keyboard(),
+                )
+                await state.clear()
+                return
+
+        try:
+            overview = await _fetch_overview_page(
+                user_id=user_id, account_id=int(account_id), page=1
+            )
+            drafts = overview.get("drafts") or []
+            transit_warehouses = overview.get("transit_warehouses") or transit_warehouses
+            await state.update_data(
+                drafts=drafts,
+                transit_warehouses=transit_warehouses,
+                autobook_user_id=user_id,
+            )
+        except Exception as e:
+            print("Error loading drafts for autobook:", e)
+            await callback.message.answer(
+                "Не удалось загрузить черновики для этого аккаунта.",
+                reply_markup=get_main_menu_keyboard(),
+            )
+            await state.clear()
+            return
 
     if not transit_warehouses:
-        drafts = data.get("drafts") or []
         if not drafts:
             await state.clear()
             await send_main_menu(callback.message, state)
