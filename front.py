@@ -2411,8 +2411,27 @@ async def autobook_menu_create_callback(callback: CallbackQuery, state: FSMConte
     await callback.answer()
     await clear_all_ui(callback.message, state)
 
-    telegram_id = callback.from_user.id
-    wait_msg = await callback.message.answer("Загружаем ваши аккаунты, подождите..")
+    text = (
+        "🚀 Автобронь\n\n"
+        "Выбери, как создать автобронь: использовать последние задачи поиска слотов\n"
+        "или начать с нуля."
+    )
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🧭 На основе поиска", callback_data="autobook_create:history")],
+            [InlineKeyboardButton(text="✨ Создать с нуля", callback_data="autobook_create:new")],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")],
+        ]
+    )
+
+    msg = await callback.message.answer(text, reply_markup=kb)
+    await add_ui_message(state, msg.message_id)
+
+
+async def _start_autobook_from_scratch(
+    message_obj: Message, state: FSMContext, telegram_id: int
+) -> None:
+    wait_msg = await message_obj.answer("Загружаем ваши аккаунты, подождите..")
     await add_ui_message(state, wait_msg.message_id)
 
     try:
@@ -2436,6 +2455,113 @@ async def autobook_menu_create_callback(callback: CallbackQuery, state: FSMConte
         return
 
     await _autobook_render_accounts(wait_msg, state, user_id)
+
+
+async def autobook_create_from_scratch_callback(
+    callback: CallbackQuery, state: FSMContext
+) -> None:
+    await callback.answer()
+    await clear_all_ui(callback.message, state)
+
+    telegram_id = callback.from_user.id
+    await _start_autobook_from_scratch(callback.message, state, telegram_id)
+
+
+async def autobook_create_from_history_callback(
+    callback: CallbackQuery, state: FSMContext
+) -> None:
+    await callback.answer()
+    await clear_all_ui(callback.message, state)
+
+    telegram_id = callback.from_user.id
+    wait_msg = await callback.message.answer("Загружаем последние задачи поиска...")
+    await add_ui_message(state, wait_msg.message_id)
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp_user = await client.get(
+                f"{BACKEND_URL}/users/get-id",
+                params={"telegram_id": telegram_id},
+            )
+            resp_user.raise_for_status()
+            user_id = resp_user.json().get("user_id")
+            if user_id is None:
+                raise ValueError("user_id is missing in /users/get-id response")
+
+            resp_history = await client.get(
+                f"{BACKEND_URL}/requests/history",
+                params={
+                    "user_id": user_id,
+                    "req_type": "slot_search",
+                    "page": 1,
+                    "page_size": HISTORY_PAGE_SIZE,
+                },
+            )
+            resp_history.raise_for_status()
+            history_resp = resp_history.json() or {}
+    except Exception as e:
+        print("Error calling slot search history:", e)
+        await wait_msg.edit_text(
+            "Не удалось загрузить историю поиска. Попробуйте позже или создайте с нуля.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="✨ Создать с нуля", callback_data="autobook_create:new"
+                        )
+                    ],
+                    [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")],
+                ]
+            ),
+        )
+        return
+
+    items = history_resp.get("items") or []
+
+    if not items:
+        await wait_msg.edit_text(
+            "Нет недавних задач поиска слотов. Можно создать автобронь с нуля.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="✨ Создать с нуля", callback_data="autobook_create:new")],
+                    [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")],
+                ]
+            ),
+        )
+        return
+
+    lines = ["Выбери задачу поиска для автоброни:\n"]
+    kb_rows = []
+    for item in items:
+        task_id = item.get("id")
+        warehouse = item.get("warehouse")
+        supply_type = item.get("supply_type")
+        period = item.get("period") or {}
+        date_from = period.get("from") or "?"
+        date_to = period.get("to") or "?"
+
+        supply_text = {
+            "box": "Короба",
+            "mono": "Монопаллеты",
+            "postal": "Поштучная паллета",
+            "safe": "Суперсейф",
+        }.get(supply_type, str(supply_type))
+
+        lines.append(f"• #{task_id}: {warehouse} — {supply_text} ({date_from}–{date_to})")
+        kb_rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"Автобронь по #{task_id}",
+                    callback_data=f"autobook_from_search:{task_id}",
+                )
+            ]
+        )
+
+    kb_rows.append([InlineKeyboardButton(text="✨ Создать с нуля", callback_data="autobook_create:new")])
+    kb_rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")])
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
+    await wait_msg.edit_text("\n".join(lines), reply_markup=kb)
 
 
 async def _autobook_render_accounts(
@@ -5881,6 +6007,10 @@ async def main() -> None:
     dp.callback_query.register(menu_autobook_new_callback, F.data == "menu_autobook")
     dp.callback_query.register(autobook_menu_list_callback, F.data == "autobook_menu:list")
     dp.callback_query.register(autobook_menu_create_callback, F.data == "autobook_menu:create")
+    dp.callback_query.register(
+        autobook_create_from_history_callback, F.data == "autobook_create:history"
+    )
+    dp.callback_query.register(autobook_create_from_scratch_callback, F.data == "autobook_create:new")
     dp.callback_query.register(on_autobook_accounts_page, F.data.startswith("autobook_accounts_page:"))
     dp.callback_query.register(on_autobook_new_refresh, F.data == "autobook_new_refresh")
     dp.callback_query.register(on_autobook_new_account, F.data.startswith("autobook_new_account:"))
