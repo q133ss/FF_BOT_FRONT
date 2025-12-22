@@ -80,6 +80,8 @@ class AutoBookTasksState(StatesGroup):
 class AutoBookNewState(StatesGroup):
     choose_account = State()
     choose_draft = State()
+    choose_source = State()
+    choose_request = State()
     warehouse = State()
     supply_type = State()
     max_coef = State()
@@ -2732,6 +2734,51 @@ async def _autobook_send_drafts(message_obj: Message, state: FSMContext) -> None
     await state.set_state(AutoBookNewState.choose_draft)
 
 
+async def _autobook_show_source_choice(message_obj: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    account = data.get("autobook_account") or {}
+    draft = data.get("autobook_draft") or {}
+
+    account_name = account.get("name") or account.get("id")
+    draft_id = draft.get("id")
+    draft_created = draft.get("created_at")
+    draft_goods = draft.get("good_quantity")
+    draft_barcodes = draft.get("barcode_quantity")
+
+    text_lines = [
+        "🚀 Автобронь",
+        "",
+        f"Продавец: {account_name}",
+        f"Черновик #{draft_id} — от {draft_created}, товаров: {draft_goods}, баркодов: {draft_barcodes}",
+        "",
+        "Как создать автобронь?",
+        "• 🆕 С нуля — выбрать параметры вручную",
+        "• 🔍 Из поиска — взять готовые параметры из задачи поиска слота",
+    ]
+
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🆕 Создать с нуля", callback_data="autobook_new_manual")],
+            [InlineKeyboardButton(text="🔍 Через поиск", callback_data="autobook_new_search:1")],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")],
+        ]
+    )
+
+    try:
+        await message_obj.edit_text("\n".join(text_lines), reply_markup=kb)
+    except Exception:
+        prev_mid = message_obj.message_id
+        new_msg = await message_obj.answer("\n".join(text_lines), reply_markup=kb)
+        await add_ui_message(state, new_msg.message_id)
+        try:
+            await message_obj.bot.delete_message(chat_id=message_obj.chat.id, message_id=prev_mid)
+            await _drop_ui_message_id(state, prev_mid)
+        except Exception:
+            pass
+
+    await state.set_state(AutoBookNewState.choose_source)
+
+
 async def _autobook_render_warehouse_page(message_obj: Message, state: FSMContext) -> None:
     data = await state.get_data()
     items = data.get("autobook_wh_items") or []
@@ -2795,6 +2842,21 @@ async def _autobook_load_warehouses(message_obj: Message, state: FSMContext) -> 
     )
 
     await _autobook_render_warehouse_page(message_obj, state)
+
+
+async def _fetch_slot_search_history(user_id: int, page: int) -> dict:
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.get(
+            f"{BACKEND_URL}/requests/history",
+            params={
+                "user_id": user_id,
+                "req_type": "slot_search",
+                "page": page,
+                "page_size": HISTORY_PAGE_SIZE,
+            },
+        )
+        resp.raise_for_status()
+        return resp.json() or {}
 
 
 async def _fetch_overview_page(user_id: int, account_id: int, page: int) -> dict:
@@ -3584,6 +3646,127 @@ async def on_autobook_drafts_page(callback: CallbackQuery, state: FSMContext) ->
     await _autobook_send_drafts(callback.message, state)
 
 
+async def _autobook_render_requests(message_obj: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    requests_list = data.get("autobook_requests") or []
+    pagination = data.get("autobook_requests_pagination") or {}
+    page_num = pagination.get("page", 1) or 1
+    total_pages = pagination.get("pages", 1) or 1
+
+    if not requests_list:
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🆕 Создать с нуля", callback_data="autobook_new_manual")],
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")],
+            ]
+        )
+        await message_obj.edit_text(
+            "Не найдено поисков слотов для создания автоброни.", reply_markup=kb
+        )
+        await state.set_state(AutoBookNewState.choose_source)
+        return
+
+    lines = [
+        "Выбери поиск слота" + (f" (стр. {page_num} из {total_pages})" if total_pages else "")
+    ]
+    kb_rows = []
+
+    for req in requests_list:
+        req_id = req.get("id")
+        warehouse = req.get("warehouse") or req.get("warehouses") or "—"
+        supply = req.get("supply_type") or "—"
+        period = req.get("period") or {}
+        period_text = f"{period.get('from')} – {period.get('to')}"
+        lines.append(f"• #{req_id}: {warehouse}, {supply}, {period_text}")
+        kb_rows.append(
+            [InlineKeyboardButton(text=f"#{req_id} — {warehouse}", callback_data=f"autobook_new_request:{req_id}")]
+        )
+
+    nav_buttons = []
+    if page_num > 1:
+        nav_buttons.append(
+            InlineKeyboardButton(text="◀️ Назад", callback_data=f"autobook_requests_page:{page_num - 1}")
+        )
+    if total_pages and page_num < total_pages:
+        nav_buttons.append(
+            InlineKeyboardButton(text="Вперед ▶️", callback_data=f"autobook_requests_page:{page_num + 1}")
+        )
+    if nav_buttons:
+        kb_rows.append(nav_buttons)
+
+    kb_rows.append([InlineKeyboardButton(text="🆕 Создать с нуля", callback_data="autobook_new_manual")])
+    kb_rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
+    try:
+        await message_obj.edit_text("\n".join(lines), reply_markup=kb)
+    except Exception:
+        prev_mid = message_obj.message_id
+        new_msg = await message_obj.answer("\n".join(lines), reply_markup=kb)
+        await add_ui_message(state, new_msg.message_id)
+        try:
+            await message_obj.bot.delete_message(chat_id=message_obj.chat.id, message_id=prev_mid)
+            await _drop_ui_message_id(state, prev_mid)
+        except Exception:
+            pass
+
+    await state.set_state(AutoBookNewState.choose_request)
+
+
+async def _autobook_load_requests(message_obj: Message, state: FSMContext, page: int = 1) -> None:
+    data = await state.get_data()
+    user_id = data.get("autobook_user_id")
+
+    if user_id is None:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp_user = await client.get(
+                    f"{BACKEND_URL}/users/get-id",
+                    params={"telegram_id": message_obj.chat.id},
+                )
+                resp_user.raise_for_status()
+                user_id = resp_user.json().get("user_id")
+        except Exception:
+            await message_obj.answer("Не удалось получить пользователя.")
+            return
+
+    try:
+        history = await _fetch_slot_search_history(user_id, page)
+    except Exception as e:
+        print("Error fetching slot search history:", e)
+        await message_obj.answer("Не удалось загрузить поиски слотов. Попробуй позже.")
+        return
+
+    try:
+        page_num = int(history.get("page", page))
+    except Exception:
+        page_num = page
+    try:
+        page_size = int(history.get("page_size", HISTORY_PAGE_SIZE))
+    except Exception:
+        page_size = HISTORY_PAGE_SIZE
+    try:
+        total = int(history.get("total", 0))
+    except Exception:
+        total = 0
+
+    total_pages = (total - 1) // page_size + 1 if total else 1
+
+    await state.update_data(
+        autobook_requests=history.get("items") or [],
+        autobook_requests_pagination={
+            "page": page_num,
+            "page_size": page_size,
+            "total": total,
+            "pages": total_pages,
+        },
+        autobook_user_id=user_id,
+    )
+
+    await _autobook_render_requests(message_obj, state)
+
+
 async def on_autobook_new_draft(callback: CallbackQuery, state: FSMContext) -> None:
     data_cb = callback.data or ""
     try:
@@ -3608,22 +3791,43 @@ async def on_autobook_new_draft(callback: CallbackQuery, state: FSMContext) -> N
     )
     await callback.answer()
 
-    try:
-        await callback.message.edit_text("Загружаем список складов, подождите..")
-    except Exception:
-        prev_mid = callback.message.message_id
-        loading_msg = await callback.message.answer("Загружаем список складов, подождите..")
-        await add_ui_message(state, loading_msg.message_id)
-        callback.message = loading_msg
-        try:
-            await callback.message.bot.delete_message(
-                chat_id=callback.message.chat.id, message_id=prev_mid
-            )
-            await _drop_ui_message_id(state, prev_mid)
-        except Exception:
-            pass
+    await _autobook_show_source_choice(callback.message, state)
 
+
+async def on_autobook_new_manual(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await clear_all_ui(callback.message, state)
     await _autobook_load_warehouses(callback.message, state)
+
+
+async def on_autobook_new_search(callback: CallbackQuery, state: FSMContext) -> None:
+    data_cb = callback.data or ""
+    try:
+        _, page_raw = data_cb.split(":", 1)
+        page = int(page_raw)
+    except Exception:
+        page = 1
+
+    await callback.answer()
+    await clear_all_ui(callback.message, state)
+
+    loading_msg = await callback.message.answer("Загружаем поиски слотов, подождите..")
+    await add_ui_message(state, loading_msg.message_id)
+
+    await _autobook_load_requests(loading_msg, state, page)
+
+
+async def on_autobook_requests_page(callback: CallbackQuery, state: FSMContext) -> None:
+    data_cb = callback.data or ""
+    try:
+        _, page_raw = data_cb.split(":", 1)
+        page = int(page_raw)
+    except Exception:
+        await callback.answer("Некорректная страница.", show_alert=True)
+        return
+
+    await callback.answer()
+    await _autobook_load_requests(callback.message, state, page)
 
 
 async def on_autobook_new_request(callback: CallbackQuery, state: FSMContext) -> None:
@@ -3667,6 +3871,13 @@ async def on_autobook_new_request(callback: CallbackQuery, state: FSMContext) ->
     draft_goods = draft.get("good_quantity")
     draft_barcodes = draft.get("barcode_quantity")
 
+    period_from = period.get("from")
+    period_to = period.get("to")
+
+    if not warehouse or not supply_type or not period_from or not period_to or lead_time is None:
+        await callback.answer("В выбранном поиске не хватает данных.", show_alert=True)
+        return
+
     summary_lines = [
         "🚀 Автобронирование",
         "",
@@ -3695,14 +3906,36 @@ async def on_autobook_new_request(callback: CallbackQuery, state: FSMContext) ->
 
     user_id = data.get("autobook_user_id") or selected.get("user_id")
 
+    warehouses_list = warehouse if isinstance(warehouse, list) else ([warehouse] if warehouse else [])
+    weekdays = selected.get("weekdays") or "daily"
+    supply_type_backend = supply_map.get(supply_type, supply_type)
+
+    payload = {
+        "user_id": user_id,
+        "seller_name": account_name,
+        "draft_id": draft_id,
+        "lead_time_days": lead_time,
+        "period_from": period_from,
+        "period_to": period_to,
+        "supply_type": supply_type_backend,
+        "telegram_chat_id": callback.from_user.id,
+        "warehouses": warehouses_list,
+        "weekdays": weekdays,
+        "max_booking_coefficient": max_coef,
+        "max_logistics_percent": logistics_percent,
+    }
+
     await state.update_data(
         autobook_request=selected,
-        autobook_new_payload={
-            "user_id": user_id,
-            "seller_name": account_name,
-            "draft_id": draft_id,
-            "slot_request_id": req_id_int,
-        },
+        autobook_new_payload=payload,
+        warehouses=warehouses_list,
+        supply_type=supply_type,
+        max_coef=max_coef,
+        max_logistics_coef_percent=logistics_percent,
+        lead_time_days=lead_time,
+        search_period_from=period_from,
+        search_period_to=period_to,
+        weekdays=weekdays,
     )
 
     try:
@@ -5885,7 +6118,11 @@ async def main() -> None:
     dp.callback_query.register(on_autobook_new_refresh, F.data == "autobook_new_refresh")
     dp.callback_query.register(on_autobook_new_account, F.data.startswith("autobook_new_account:"))
     dp.callback_query.register(on_autobook_drafts_page, F.data.startswith("autobook_drafts_page:"))
+    dp.callback_query.register(on_autobook_new_manual, F.data == "autobook_new_manual")
+    dp.callback_query.register(on_autobook_new_search, F.data.startswith("autobook_new_search:"))
+    dp.callback_query.register(on_autobook_requests_page, F.data.startswith("autobook_requests_page:"))
     dp.callback_query.register(on_autobook_new_draft, F.data.startswith("autobook_new_draft:"))
+    dp.callback_query.register(on_autobook_new_request, F.data.startswith("autobook_new_request:"))
     dp.callback_query.register(on_autobook_new_confirm, F.data == "autobook_new_confirm")
     dp.callback_query.register(on_autobook_new_cancel, F.data == "autobook_new_cancel")
     dp.callback_query.register(on_autobook_new_retry, F.data == "autobook_new_retry")
