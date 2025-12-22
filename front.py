@@ -4861,6 +4861,13 @@ async def autobook_choose_transit_step(message: Message, state: FSMContext) -> N
     for d in drafts:
         draft_id = d.get("id")
         name = d.get("name")
+        created = d.get("created_at")
+        barcode_qty = d.get("barcode_quantity")
+        good_qty = d.get("good_quantity")
+        author = d.get("author")
+        text_lines.append(
+            f"• #{draft_id} от {created} — товаров: {good_qty}, баркодов: {barcode_qty}, автор: {author}"
+        )
         kb_rows.append(
             [
                 InlineKeyboardButton(
@@ -4981,9 +4988,17 @@ async def on_autobook_transit(callback: CallbackQuery, state: FSMContext) -> Non
         return
 
     kb_rows = []
+    text_lines = ["Выберите черновик из списка:"]
     for d in drafts:
         draft_id = d.get("id")
         name = d.get("name")
+        created = d.get("created_at")
+        barcode_qty = d.get("barcode_quantity")
+        good_qty = d.get("good_quantity")
+        author = d.get("author")
+        text_lines.append(
+            f"• #{draft_id} от {created} — товаров: {good_qty}, баркодов: {barcode_qty}, автор: {author}"
+        )
         kb_rows.append(
             [
                 InlineKeyboardButton(
@@ -4998,7 +5013,7 @@ async def on_autobook_transit(callback: CallbackQuery, state: FSMContext) -> Non
     kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
     await _autobook_clear_messages(callback.message, state)
-    new_msg = await callback.message.answer("Выберите черновик из списка:", reply_markup=kb)
+    new_msg = await callback.message.answer("\n".join(text_lines), reply_markup=kb)
     await _autobook_add_message_id(new_msg, state)
     await add_ui_message(state, new_msg.message_id)
     await state.set_state(AutoBookState.choose_draft)
@@ -5080,6 +5095,11 @@ async def on_autobook_confirm(callback: CallbackQuery, state: FSMContext) -> Non
         await add_ui_message(state, msg_err.message_id)
         await state.clear()
         return
+
+    success_msg = await callback.message.answer(
+        "Автобронь успешно запустилась. Ожидайте обновлений по слотам."
+    )
+    await add_ui_message(state, success_msg.message_id)
 
     await clear_all_ui(callback.message, state)
     await state.clear()
@@ -5308,9 +5328,17 @@ async def on_autobook_choose_account(callback: CallbackQuery, state: FSMContext)
             return
 
         kb_rows = []
+        lines = ["Выберите черновик из списка:"]
         for d in drafts:
             draft_id = d.get("id")
             name = d.get("name")
+            created = d.get("created_at")
+            barcode_qty = d.get("barcode_quantity")
+            good_qty = d.get("good_quantity")
+            author = d.get("author")
+            lines.append(
+                f"• #{draft_id} от {created} — товаров: {good_qty}, баркодов: {barcode_qty}, автор: {author}"
+            )
             kb_rows.append(
                 [
                     InlineKeyboardButton(
@@ -5323,7 +5351,7 @@ async def on_autobook_choose_account(callback: CallbackQuery, state: FSMContext)
         kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
         await _autobook_clear_messages(callback.message, state)
-        new_msg = await callback.message.answer("Выберите черновик из списка:", reply_markup=kb)
+        new_msg = await callback.message.answer("\n".join(lines), reply_markup=kb)
         await _autobook_add_message_id(new_msg, state)
         await add_ui_message(state, new_msg.message_id)
         await state.set_state(AutoBookState.choose_draft)
