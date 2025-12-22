@@ -4529,16 +4529,18 @@ async def on_autobook_from_search(callback: CallbackQuery, state: FSMContext) ->
         "weekends": "Только выходные",
     }.get(weekdays, str(weekdays))
 
+    logistics_line = (
+        f"Логистика: до {max_logistics_coef_percent}%\n"
+        if max_logistics_coef_percent is not None
+        else "Логистика: не ограничена\n"
+    )
+
     text = (
         "🚀 Автобронирование\n\n"
         f"Склад: {_format_warehouses_label(warehouse)}\n"
         f"Тип поставки: {supply_type_text}\n"
         f"Коэффициент: ≤x{max_coef}\n"
-        (
-            f"Логистика: до {max_logistics_coef_percent}%\n"
-            if max_logistics_coef_percent is not None
-            else "Логистика: не ограничена\n"
-        )
+        f"{logistics_line}"
         f"Лид-тайм (мин. кол-во дней до слота): {lead_time_days}\n"
         f"Поиск слота на даты: {date_from}–{date_to}\n"
         f"Дни недели: {weekdays_text}\n\n"
