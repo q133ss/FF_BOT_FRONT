@@ -170,6 +170,31 @@ def _format_warehouses_label(value) -> str:
     return str(value)
 
 
+def _format_weekdays_text(weekdays_code) -> str:
+    ru_days = {
+        "mon": "пн",
+        "tue": "вт",
+        "wed": "ср",
+        "thu": "чт",
+        "fri": "пт",
+        "sat": "сб",
+        "sun": "вс",
+    }
+
+    if weekdays_code == "daily":
+        return "Каждый день"
+    if weekdays_code == "weekdays":
+        return "Только будни (пн–пт)"
+    if weekdays_code == "weekends":
+        return "Только выходные (сб–вс)"
+    if isinstance(weekdays_code, str) and weekdays_code.startswith("custom:"):
+        raw = weekdays_code.split(":", 1)[1]
+        keys = [k for k in raw.split(",") if k]
+        translated = ", ".join(ru_days.get(k, k) for k in keys)
+        return f"custom:{translated}" if translated else "-"
+    return "-" if weekdays_code is None else str(weekdays_code)
+
+
 def build_slot_summary(data: dict, *, action_line: str | None = None) -> str:
     """
     Собирает человекочитаемую сводку параметров задачи поиска слота.
@@ -194,30 +219,7 @@ def build_slot_summary(data: dict, *, action_line: str | None = None) -> str:
         "safe": "Суперсейф",
     }.get(supply_type, str(supply_type))
 
-    # Дни недели
-    ru_days = {
-        "mon": "пн",
-        "tue": "вт",
-        "wed": "ср",
-        "thu": "чт",
-        "fri": "пт",
-        "sat": "сб",
-        "sun": "вс",
-    }
-
-    if weekdays_code == "daily":
-        weekdays_text = "Каждый день"
-    elif weekdays_code == "weekdays":
-        weekdays_text = "Только будни (пн–пт)"
-    elif weekdays_code == "weekends":
-        weekdays_text = "Только выходные (сб–вс)"
-    elif isinstance(weekdays_code, str) and weekdays_code.startswith("custom:"):
-        # custom:mon,sat,sun,thu,tue → "пн, сб, вс, чт, вт"
-        raw = weekdays_code.split(":", 1)[1]
-        keys = [k for k in raw.split(",") if k]
-        weekdays_text = ", ".join(ru_days.get(k, k) for k in keys)
-    else:
-        weekdays_text = "-" if weekdays_code is None else str(weekdays_code)
+    weekdays_text = _format_weekdays_text(weekdays_code)
 
     # Период поиска
     def format_period(date_from: str | None, date_to: str | None) -> str:
@@ -4442,6 +4444,9 @@ async def on_autobook_from_search(callback: CallbackQuery, state: FSMContext) ->
     await clear_all_ui(callback.message, state)
     await state.update_data(autobook_message_ids=[], slot_search_task_id=slot_search_task_id)
 
+    loading_msg = await callback.message.answer("Загружаем ваш ЛК, подождите..")
+    await _autobook_add_message_id(loading_msg, state)
+
     data_state = await state.get_data()
     history_items = data_state.get("autobook_history_items") or []
     slot_task_raw = next((i for i in history_items if i.get("id") == slot_search_task_id), None)
@@ -4487,6 +4492,7 @@ async def on_autobook_from_search(callback: CallbackQuery, state: FSMContext) ->
             accounts = accounts_resp.get("items") or accounts_resp.get("accounts") or []
     except Exception as e:
         print("Error loading accounts for autobook from history:", e)
+        await _autobook_clear_messages(callback.message, state)
         await callback.answer("Не удалось загрузить аккаунты.", show_alert=True)
         return
 
@@ -4523,11 +4529,7 @@ async def on_autobook_from_search(callback: CallbackQuery, state: FSMContext) ->
         "safe": "Суперсейф",
     }.get(supply_type, str(supply_type))
 
-    weekdays_text = {
-        "daily": "Ежедневно",
-        "weekdays": "Только будни",
-        "weekends": "Только выходные",
-    }.get(weekdays, str(weekdays))
+    weekdays_text = _format_weekdays_text(weekdays)
 
     logistics_line = (
         f"Логистика: до {max_logistics_coef_percent}%\n"
@@ -4854,12 +4856,11 @@ async def autobook_choose_transit_step(message: Message, state: FSMContext) -> N
         await message.answer("Не найдено черновиков для автобронирования.", reply_markup=get_main_menu_keyboard())
         return
 
-    text_lines = ["Выберите черновик из списка:\n"]
+    text_lines = ["Выберите черновик из списка:"]
     kb_rows = []
     for d in drafts:
         draft_id = d.get("id")
         name = d.get("name")
-        text_lines.append(f"• {name} (id: {draft_id})")
         kb_rows.append(
             [
                 InlineKeyboardButton(
@@ -4906,6 +4907,7 @@ async def on_autobook_choose_draft(callback: CallbackQuery, state: FSMContext) -
     date_from = slot_task.get("date_from")
     date_to = slot_task.get("date_to")
     weekdays = slot_task.get("weekdays")
+    warehouse_label = _format_warehouses_label(warehouse)
 
     supply_type_text = {
         "box": "Короба",
@@ -4914,22 +4916,20 @@ async def on_autobook_choose_draft(callback: CallbackQuery, state: FSMContext) -
         "safe": "Суперсейф",
     }.get(supply_type, str(supply_type))
 
-    weekdays_text = {
-        "daily": "Ежедневно",
-        "weekdays": "Только будни",
-        "weekends": "Только выходные",
-    }.get(weekdays, str(weekdays))
+    weekdays_text = _format_weekdays_text(weekdays)
+    account_name = data.get("account_name")
+    account_label = account_name or account_id
 
     summary_lines = [
         "🚀 Ваше задание на автобронирование\n",
         f"Задача поиска #{slot_search_task_id}",
-        f"Склад: {warehouse}",
+        f"Склад: {warehouse_label}",
         f"Тип поставки: {supply_type_text}",
         f"Коэффициент приёмки: ≤x{max_coef}" if max_coef is not None else "",
         f"Лид-тайм: {lead_time_days} дн." if lead_time_days is not None else "",
         f"Период: {date_from}–{date_to}",
         f"Дни недели: {weekdays_text}",
-        f"Кабинет: {account_id}" if account_id else "",
+        f"Кабинет: {account_label}" if account_label else "",
         f"Транзитный склад: {transit_id}" if transit_id else "",
         "",
         f"Черновик: {draft_id}",
@@ -4980,12 +4980,10 @@ async def on_autobook_transit(callback: CallbackQuery, state: FSMContext) -> Non
         await send_main_menu(callback.message, state)
         return
 
-    text_lines = ["Выберите черновик из списка:\n"]
     kb_rows = []
     for d in drafts:
         draft_id = d.get("id")
         name = d.get("name")
-        text_lines.append(f"• {name} (id: {draft_id})")
         kb_rows.append(
             [
                 InlineKeyboardButton(
@@ -5000,7 +4998,7 @@ async def on_autobook_transit(callback: CallbackQuery, state: FSMContext) -> Non
     kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
     await _autobook_clear_messages(callback.message, state)
-    new_msg = await callback.message.answer("\n".join(text_lines), reply_markup=kb)
+    new_msg = await callback.message.answer("Выберите черновик из списка:", reply_markup=kb)
     await _autobook_add_message_id(new_msg, state)
     await add_ui_message(state, new_msg.message_id)
     await state.set_state(AutoBookState.choose_draft)
@@ -5010,22 +5008,72 @@ async def on_autobook_confirm(callback: CallbackQuery, state: FSMContext) -> Non
     await callback.answer()
     await clear_all_ui(callback.message, state)
     data = await state.get_data()
-    slot_task_id = data.get("slot_search_task_id")
+    slot_task = data.get("slot_task") or {}
     telegram_id = callback.from_user.id
+    user_id = data.get("autobook_user_id")
+    account_name = data.get("account_name")
+    draft_id = data.get("draft_id")
+    account_id = data.get("account_id")
+
+    if draft_id is None:
+        await callback.message.answer(
+            "Не выбран черновик для автобронирования. Вернитесь и выберите черновик.",
+            reply_markup=get_main_menu_keyboard(),
+        )
+        await state.clear()
+        return
+
+    if user_id is None:
+        user_id = await _get_user_id(telegram_id)
+        if user_id is None:
+            msg_err = await callback.message.answer(
+                "Не удалось определить пользователя. Попробуйте позже.",
+                reply_markup=get_main_menu_keyboard(),
+            )
+            await add_ui_message(state, msg_err.message_id)
+            await state.clear()
+            return
+
+    warehouse = slot_task.get("warehouses") or slot_task.get("warehouse")
+    if isinstance(warehouse, (list, tuple, set)):
+        warehouses = [w for w in warehouse if w]
+    elif warehouse:
+        warehouses = [warehouse]
+    else:
+        warehouses = []
+    supply_type = slot_task.get("supply_type")
+    supply_type_text = {
+        "box": "Короба",
+        "mono": "Монопаллеты",
+        "postal": "Поштучная паллета",
+        "safe": "Суперсейф",
+    }.get(supply_type, str(supply_type))
+
+    lead_time_raw = slot_task.get("lead_time_days")
+    try:
+        lead_time_value = int(lead_time_raw) if lead_time_raw is not None else 0
+    except (TypeError, ValueError):
+        lead_time_value = 0
+
+    payload = {
+        "draft_id": int(draft_id) if draft_id is not None else draft_id,
+        "lead_time_days": lead_time_value,
+        "period_from": slot_task.get("date_from"),
+        "period_to": slot_task.get("date_to"),
+        "seller_name": account_name or account_id,
+        "supply_type": supply_type_text,
+        "telegram_chat_id": telegram_id,
+        "user_id": user_id,
+        "warehouses": warehouses,
+        "weekdays": slot_task.get("weekdays") or "daily",
+    }
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
-                f"{BACKEND_URL}/autobook/create",
-                json={
-                    "telegram_id": telegram_id,
-                    "slot_search_task_id": slot_task_id,
-                    "logistics_accept_mode": "any",
-                },
-            )
+            resp = await client.post(f"{BACKEND_URL}/wb/autobooking", json=payload)
             resp.raise_for_status()
     except Exception as e:
-        print("Error calling /autobook/create in confirm step:", e)
+        print("Error calling /wb/autobooking in confirm step:", e)
         msg_err = await callback.message.answer(
             "Не удалось создать задачу автобронирования. Попробуй позже."
         )
@@ -5202,7 +5250,11 @@ async def on_autobook_choose_account(callback: CallbackQuery, state: FSMContext)
         await send_main_menu(callback.message, state)
         return
 
-    await state.update_data(account_id=account_id)
+    data = await state.get_data()
+    accounts = data.get("accounts") or []
+    account_name = next((a.get("name") for a in accounts if str(a.get("id")) == account_id), None)
+
+    await state.update_data(account_id=account_id, account_name=account_name)
     data = await state.get_data()
     transit_warehouses = data.get("transit_warehouses") or []
     drafts = data.get("drafts") or []
@@ -5228,6 +5280,8 @@ async def on_autobook_choose_account(callback: CallbackQuery, state: FSMContext)
                 return
 
         try:
+            loading_msg = await callback.message.answer("Загружаем ваши черновики, подождите..")
+            await _autobook_add_message_id(loading_msg, state)
             overview = await _fetch_overview_page(
                 user_id=user_id, account_id=int(account_id), page=1
             )
@@ -5253,12 +5307,10 @@ async def on_autobook_choose_account(callback: CallbackQuery, state: FSMContext)
             await send_main_menu(callback.message, state)
             return
 
-        text_lines = ["Выберите черновик из списка:\n"]
         kb_rows = []
         for d in drafts:
             draft_id = d.get("id")
             name = d.get("name")
-            text_lines.append(f"• {name} (id: {draft_id})")
             kb_rows.append(
                 [
                     InlineKeyboardButton(
@@ -5271,7 +5323,7 @@ async def on_autobook_choose_account(callback: CallbackQuery, state: FSMContext)
         kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
         await _autobook_clear_messages(callback.message, state)
-        new_msg = await callback.message.answer("\n".join(text_lines), reply_markup=kb)
+        new_msg = await callback.message.answer("Выберите черновик из списка:", reply_markup=kb)
         await _autobook_add_message_id(new_msg, state)
         await add_ui_message(state, new_msg.message_id)
         await state.set_state(AutoBookState.choose_draft)
