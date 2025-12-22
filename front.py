@@ -2,6 +2,7 @@ import os
 import re
 import asyncio
 from datetime import datetime, date, timedelta
+from typing import Optional
 
 from dotenv import load_dotenv
 import httpx
@@ -5083,10 +5084,16 @@ async def on_autobook_confirm(callback: CallbackQuery, state: FSMContext) -> Non
         "weekdays": slot_task.get("weekdays") or "daily",
     }
 
+    response_status: Optional[int] = None
+    timed_out = False
+
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(f"{BACKEND_URL}/wb/autobooking", json=payload)
-            resp.raise_for_status()
+            response_status = resp.status_code
+    except httpx.ReadTimeout:
+        timed_out = True
+        print("Timeout calling /wb/autobooking in confirm step: request still pending")
     except Exception as e:
         print("Error calling /wb/autobooking in confirm step:", e)
         msg_err = await callback.message.answer(
@@ -5095,6 +5102,15 @@ async def on_autobook_confirm(callback: CallbackQuery, state: FSMContext) -> Non
         await add_ui_message(state, msg_err.message_id)
         await state.clear()
         return
+
+    if not timed_out and response_status is not None:
+        if response_status == 422 or response_status >= 500:
+            msg_err = await callback.message.answer(
+                "Не удалось создать задачу автобронирования. Попробуй позже."
+            )
+            await add_ui_message(state, msg_err.message_id)
+            await state.clear()
+            return
 
     success_msg = await callback.message.answer(
         "Автобронь успешно запустилась. Ожидайте обновлений по слотам."
