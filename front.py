@@ -3599,6 +3599,12 @@ async def on_autobook_new_account(callback: CallbackQuery, state: FSMContext) ->
             await callback.answer("Не удалось обновить пользователя.", show_alert=True)
             return
 
+    # Answer early to avoid Telegram callback timeout while we fetch data.
+    try:
+        await callback.answer()
+    except Exception as e:
+        print("Failed to answer callback in on_autobook_new_account:", e)
+
     try:
         await callback.message.edit_text("Загружаем ваши черновики, подождите..")
     except Exception:
@@ -3645,7 +3651,6 @@ async def on_autobook_new_account(callback: CallbackQuery, state: FSMContext) ->
         autobook_drafts_page=pagination.get("page", 1),
         autobook_drafts_pagination=pagination,
     )
-    await callback.answer()
     await _autobook_send_drafts(callback.message, state)
 
 
@@ -3666,6 +3671,12 @@ async def on_autobook_drafts_page(callback: CallbackQuery, state: FSMContext) ->
     if user_id is None or account_id is None:
         await callback.answer("Не хватает данных для обновления.", show_alert=True)
         return
+
+    # Answer early so Telegram does not expire the callback while we fetch the page.
+    try:
+        await callback.answer()
+    except Exception as e:
+        print("Failed to answer callback in on_autobook_drafts_page:", e)
 
     try:
         await callback.message.edit_text("Загружаем список складов, подождите..")
@@ -3711,7 +3722,6 @@ async def on_autobook_drafts_page(callback: CallbackQuery, state: FSMContext) ->
         autobook_account=selected,
     )
 
-    await callback.answer()
     await _autobook_send_drafts(callback.message, state)
 
 
