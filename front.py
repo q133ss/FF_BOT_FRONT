@@ -33,6 +33,18 @@ SLOT_RESULTS_MAX_CHARS = 3500
 user_sessions = {} # ЗАМЕНИТЬ НА РЕАЛЬНУЮ БД
 slot_results_cache = {}
 
+def _log_http_error(prefix: str, exc: Exception) -> None:
+    """
+    Печатает статус и тело ответа для удобной отладки HTTP-запросов.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        try:
+            print(f"{prefix}: status={exc.response.status_code}, body={exc.response.text}")
+        except Exception:
+            print(f"{prefix}: {exc}")
+    else:
+        print(f"{prefix}: {exc}")
+
 # Загружаем переменные окружения
 load_dotenv()
 
@@ -3506,19 +3518,21 @@ async def on_autobook_week(callback: CallbackQuery, state: FSMContext) -> None:
         if supply_type_backend and warehouses_selected:
             try:
                 async with httpx.AsyncClient(timeout=10.0) as client:
+                    availability_payload = {
+                        "supply_type": supply_type_backend,
+                        "warehouses": warehouses_selected,
+                    }
+                    print("Debug /warehouses/availability payload:", availability_payload)
                     resp = await client.post(
                         f"{BACKEND_URL}/warehouses/availability",
-                        json={
-                            "supply_type": supply_type_backend,
-                            "warehouses": warehouses_selected,
-                        },
+                        json=availability_payload,
                     )
                     resp.raise_for_status()
                     availability_resp = resp.json() or {}
                     available_warehouses = availability_resp.get("available") or warehouses_selected
                     unavailable = availability_resp.get("unavailable") or []
             except Exception as e:
-                print("Error calling /warehouses/availability:", e)
+                _log_http_error("Error calling /warehouses/availability", e)
 
         await delete_ui_message(callback.message, state, waiting_msg.message_id)
 
@@ -4084,12 +4098,15 @@ async def on_autobook_new_confirm(callback: CallbackQuery, state: FSMContext) ->
     status_msg = await callback.message.answer("Автобронирование в процессе, ждите!")
     await add_ui_message(state, status_msg.message_id)
 
+    print("Debug /wb/autobooking payload:", payload)
+
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
             resp = await client.post(f"{BACKEND_URL}/wb/autobooking", json=payload)
             resp.raise_for_status()
+            print("Debug /wb/autobooking response:", resp.status_code, resp.text)
     except Exception as e:
-        print("Error calling /wb/autobooking:", e)
+        _log_http_error("Error calling /wb/autobooking", e)
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="Повторить", callback_data="autobook_new_retry")],
