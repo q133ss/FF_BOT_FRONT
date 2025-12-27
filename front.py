@@ -4095,33 +4095,25 @@ async def on_autobook_new_confirm(callback: CallbackQuery, state: FSMContext) ->
     except Exception:
         pass
 
-    status_msg = await callback.message.answer("Автобронирование в процессе, ждите!")
-    await add_ui_message(state, status_msg.message_id)
-
-    print("Debug /wb/autobooking payload:", payload)
-
-    try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            resp = await client.post(f"{BACKEND_URL}/wb/autobooking", json=payload)
-            resp.raise_for_status()
-            print("Debug /wb/autobooking response:", resp.status_code, resp.text)
-    except Exception as e:
-        _log_http_error("Error calling /wb/autobooking", e)
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="Повторить", callback_data="autobook_new_retry")],
-                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")],
-            ]
-        )
-        await status_msg.edit_text(
-            "Не удалось создать автобронь. Попробовать снова?", reply_markup=kb
-        )
-        return
-
-    await state.clear()
-    await status_msg.edit_text(
+    status_msg = await callback.message.answer(
         "Автобронирование в процессе, ждите!", reply_markup=get_main_menu_keyboard()
     )
+    await add_ui_message(state, status_msg.message_id)
+
+    payload_to_send = dict(payload)
+
+    async def _fire_autobooking_request(data: dict) -> None:
+        print("Debug /wb/autobooking payload:", data)
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                resp = await client.post(f"{BACKEND_URL}/wb/autobooking", json=data)
+                resp.raise_for_status()
+                print("Debug /wb/autobooking response:", resp.status_code, resp.text)
+        except Exception as e:
+            _log_http_error("Error calling /wb/autobooking", e)
+
+    asyncio.create_task(_fire_autobooking_request(payload_to_send))
+    await state.clear()
 
 
 async def on_autobook_new_retry(callback: CallbackQuery, state: FSMContext) -> None:
