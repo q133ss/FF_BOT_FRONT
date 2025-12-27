@@ -29,7 +29,9 @@ AUTBOOK_PAGE_SIZE = 5
 AUTBOOK_ACCOUNTS_PAGE_SIZE = 5
 MOVES_PAGE_SIZE = 5
 OVERVIEW_PAGE_SIZE = 10
+SLOT_RESULTS_MAX_CHARS = 3500
 user_sessions = {} # ЗАМЕНИТЬ НА РЕАЛЬНУЮ БД
+slot_results_cache = {}
 
 # Загружаем переменные окружения
 load_dotenv()
@@ -279,6 +281,20 @@ def _extract_slots(data: dict | None) -> list:
 
     return []
 
+def _extract_found_count(response: dict | None, slots_raw: list | None = None) -> int:
+    """
+    Определяет количество найденных слотов из ответа бэкенда или по длине списка.
+    """
+    for key in ("found", "slots_found", "found_slots", "slots_count"):
+        value = (response or {}).get(key)
+        if value is not None:
+            try:
+                return int(value)
+            except Exception:
+                return value
+
+    return len(slots_raw or [])
+
 
 def format_slot_lines(slots: list | None) -> list[str]:
     """
@@ -344,7 +360,7 @@ def format_slot_lines(slots: list | None) -> list[str]:
     return lines
 
 
-def _build_slot_search_started_text(data: dict, response: dict | None) -> str:
+def _build_slot_search_started_text(data: dict, response: dict | None, *, include_slots: bool = True) -> str:
     warehouse = data.get("warehouses") or data.get("warehouse") or "-"
     supply_type = data.get("supply_type")
     max_coef = data.get("max_coef")
@@ -364,16 +380,9 @@ def _build_slot_search_started_text(data: dict, response: dict | None) -> str:
     )
 
     slots_raw = _extract_slots(response)
-    slot_lines = format_slot_lines(slots_raw)
+    slot_lines = format_slot_lines(slots_raw) if include_slots else []
 
-    found_count = None
-    for key in ("found", "slots_found", "found_slots", "slots_count"):
-        value = (response or {}).get(key)
-        if value is not None:
-            found_count = value
-            break
-    if found_count is None:
-        found_count = len(slots_raw)
+    found_count = _extract_found_count(response, slots_raw)
 
     lines = [
         "Поиск слота запущен ✅",
@@ -386,11 +395,66 @@ def _build_slot_search_started_text(data: dict, response: dict | None) -> str:
         f"🎯 Найдено слотов уже сейчас: {found_count}",
     ]
 
-    if slot_lines:
+    if include_slots and slot_lines:
         lines.append("")
         lines.extend(slot_lines)
 
     return "\n".join(lines)
+
+def _slot_cache_key(telegram_id: int, request_ref: str | int | None) -> tuple[int, str]:
+    ref = str(request_ref) if request_ref is not None else "latest"
+    return (telegram_id, ref)
+
+
+def _cache_slot_results(
+    telegram_id: int,
+    request_ref: str | int | None,
+    slots_raw: list | None,
+    found_count: int | None,
+) -> None:
+    slot_results_cache[_slot_cache_key(telegram_id, request_ref)] = {
+        "slots": slots_raw or [],
+        "found": found_count if found_count is not None else len(slots_raw or []),
+    }
+
+
+async def _get_slot_results(
+    telegram_id: int,
+    request_ref: str | int | None,
+) -> tuple[list, int]:
+    cache_key = _slot_cache_key(telegram_id, request_ref)
+    cached = slot_results_cache.get(cache_key)
+    if cached:
+        slots_cached = cached.get("slots") or []
+        found_cached = cached.get("found")
+        return slots_cached, found_cached if found_cached is not None else len(slots_cached)
+
+    try:
+        request_id_int = int(str(request_ref))
+    except Exception:
+        request_id_int = None
+
+    if request_id_int is None:
+        return [], 0
+
+    payload = None
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{BACKEND_URL}/slots/search/{request_id_int}")
+            resp.raise_for_status()
+            payload = resp.json()
+    except Exception as e:
+        print(f"Error calling /slots/search/{request_id_int} for slots preview:", e)
+        if cached:
+            slots_cached = cached.get("slots") or []
+            found_cached = cached.get("found")
+            return slots_cached, found_cached if found_cached is not None else len(slots_cached)
+        return [], 0
+
+    slots_raw = _extract_slots(payload)
+    found_count = _extract_found_count(payload, slots_raw)
+    _cache_slot_results(telegram_id, request_ref, slots_raw, found_count)
+    return slots_raw, found_count
 
 
 async def _get_user_id(telegram_id: int) -> int | None:
@@ -5882,6 +5946,9 @@ async def on_slot_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     print("================================\n")
 
+    loading_msg = await callback.message.answer("Идет поиск слотов, подождите...")
+    await add_ui_message(state, loading_msg.message_id)
+
     # 4) Отправка запроса
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
@@ -5890,26 +5957,75 @@ async def on_slot_confirm(callback: CallbackQuery, state: FSMContext) -> None:
             result = resp.json()
     except Exception as e:
         print("Error calling /slots/search:", e)
-        await callback.message.answer("Ошибка создания задачи на поиск слота.")
+        try:
+            await loading_msg.edit_text("Ошибка создания задачи на поиск слота.")
+        except Exception:
+            await callback.message.answer("Ошибка создания задачи на поиск слота.")
         return
 
-    try:
-        text = _build_slot_search_started_text({
-            "warehouse": warehouse,
-            "supply_type": supply_type,
-            "max_coef": max_coef,
-            "max_logistics_coef_percent": max_logistics_coef_percent,
-            "search_period_from": search_period_from,
-            "search_period_to": search_period_to,
-        }, result)
-        msg = await callback.message.answer(text)
-        await add_ui_message(state, msg.message_id)
-    except Exception as e:
-        print("Error rendering slot search started message:", e)
+    request_id = (
+        result.get("request_id")
+        or result.get("id")
+        or result.get("task_id")
+        or result.get("slot_search_task_id")
+    )
+    slots_raw = _extract_slots(result)
+    found_count = _extract_found_count(result, slots_raw)
 
-    # 5) Переход в список задач
+    _cache_slot_results(telegram_id, request_id, slots_raw, found_count)
+
+    try:
+        await delete_ui_message(callback.message, state, loading_msg.message_id)
+    except Exception:
+        pass
+
     await state.clear()
-    await _do_main_menu_my_searches(callback.message, state, telegram_id)
+
+
+async def on_slot_view_open(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    data_cb = callback.data or ""
+    try:
+        _, request_ref = data_cb.split(":", 1)
+    except Exception:
+        request_ref = "latest"
+
+    telegram_id = callback.from_user.id
+    slots_raw, found_count = await _get_slot_results(telegram_id, request_ref)
+    slot_lines = format_slot_lines(slots_raw)
+
+    total_found = found_count if found_count is not None else len(slot_lines)
+    text, total_pages, page = _build_slot_results_page(slot_lines, 1, total_found)
+    kb = _build_slot_results_keyboard(str(request_ref), page, total_pages)
+
+    msg = await callback.message.answer(text, reply_markup=kb)
+    await add_ui_message(state, msg.message_id)
+
+
+async def on_slot_view_page(callback: CallbackQuery, state: FSMContext) -> None:
+    data_cb = callback.data or ""
+    try:
+        _, request_ref, page_raw = data_cb.split(":", 2)
+        page = int(page_raw)
+    except Exception:
+        await callback.answer("Некорректная страница.", show_alert=True)
+        return
+
+    telegram_id = callback.from_user.id
+    slots_raw, found_count = await _get_slot_results(telegram_id, request_ref)
+    slot_lines = format_slot_lines(slots_raw)
+    total_found = found_count if found_count is not None else len(slot_lines)
+    text, total_pages, page = _build_slot_results_page(slot_lines, page, total_found)
+    kb = _build_slot_results_keyboard(str(request_ref), page, total_pages)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=kb)
+    except Exception as e:
+        print("Error updating slots page:", e)
+        msg = await callback.message.answer(text, reply_markup=kb)
+        await add_ui_message(state, msg.message_id)
+
+    await callback.answer()
 
 
 async def on_autobook_load(callback: CallbackQuery, state: FSMContext):
@@ -6011,6 +6127,8 @@ async def main() -> None:
     dp.callback_query.register(on_slot_lead, F.data.startswith("slot_lead:"))
     dp.callback_query.register(on_slot_week, F.data.startswith("slot_week:"))
     dp.callback_query.register(on_slot_confirm, F.data == "slot_confirm:create")
+    dp.callback_query.register(on_slot_view_open, F.data.startswith("slot_view_open:"))
+    dp.callback_query.register(on_slot_view_page, F.data.startswith("slot_view_page:"))
     dp.callback_query.register(on_slot_week, F.data.startswith("slot_day:"))
     dp.callback_query.register(on_slot_tasks_page, F.data.startswith("slot_tasks_page:"))
     dp.callback_query.register(on_slot_tasks_main_menu, F.data == "slot_tasks_main_menu")
