@@ -2031,6 +2031,11 @@ async def _render_tasks_history(
     if nav_buttons:
         kb_rows.append(nav_buttons)
 
+    if req_type == "slot_search":
+        kb_rows.append([InlineKeyboardButton(text="Создать поиск слота", callback_data="menu_search")])
+    if req_type == "auto_booking":
+        kb_rows.append([InlineKeyboardButton(text="Добавить автобронирование", callback_data="menu_autobook")])
+
     kb_rows.append([InlineKeyboardButton(text="📋 Мои задачи", callback_data="menu_tasks")])
     kb_rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")])
 
